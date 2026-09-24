@@ -21,13 +21,16 @@ import requests
 
 from .core import ROOT, SafeError, Secrets, artifact_dir, atomic_json, digest, load_config
 from .locking import bitrise_processes, host_lock
+from . import source as sources
 
 
 class Commands:
-    def __init__(self, env, sensitive=()):
+    def __init__(self, env, sensitive=(), canceled=None, monitor_bitrise=True):
         self.env = env
         self.sensitive = set(str(s) for s in sensitive if s)
         self.process = None
+        self.canceled = canceled or (lambda: False)
+        self.monitor_bitrise = monitor_bitrise
 
     def redact(self, text):
         for value in sorted(self.sensitive, key=len, reverse=True):
@@ -36,6 +39,8 @@ class Commands:
         return re.sub(r'(https?://)[^\s/@]+:[^\s/@]+@', r'\1[REDACTED]@', text)
 
     def run(self, args, cwd=None, capture=False, label=None):
+        if self.canceled():
+            raise KeyboardInterrupt()
         print('\n→ ' + (label or Path(str(args[0])).name), flush=True)
         self.process = subprocess.Popen([str(a) for a in args], cwd=cwd, env=self.env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace',
@@ -43,16 +48,17 @@ class Commands:
         p = self.process
         out = []
         collision = threading.Event()
+        canceled = threading.Event()
         done = threading.Event()
 
         def monitor():
             while not done.wait(2):
                 try:
-                    running = bool(bitrise_processes())
+                    running = self.monitor_bitrise and bool(bitrise_processes())
                 except Exception:
                     running = True
-                if running:
-                    collision.set()
+                if running or self.canceled():
+                    (collision if running else canceled).set()
                     try:
                         os.killpg(p.pid, signal.SIGTERM)
                     except ProcessLookupError:
@@ -86,6 +92,8 @@ class Commands:
             done.set()
             watch.join(timeout=3)
             self.process = None
+        if canceled.is_set():
+            raise KeyboardInterrupt()
         if collision.is_set():
             raise SafeError('Bitrise restarted during the pilot; the new build was stopped. Re-establish an exclusive window.')
         if rc:
@@ -288,7 +296,7 @@ def ios(c, store, cmd, repo, temp, output):
         raise SafeError('CocoaPods version differs from toolchain.expected_pod.')
     # Rewrite only the known vendor URL in this disposable checkout, in both lockfile and Podfile.
     old = 'git@github.com:BentoInc/bento.mobileapp.git'
-    new = c['ios']['native_dependencies_url']
+    new = sources.native_url(c)
     for file in (repo / 'ios/Podfile', repo / 'ios/Podfile.lock'):
         file.write_text(file.read_text().replace(old, new))
     lock = repo / 'ios/Podfile.lock'
@@ -296,26 +304,9 @@ def ios(c, store, cmd, repo, temp, output):
         'PODFILE CHECKSUM: ' + __import__('hashlib').sha1((repo / 'ios/Podfile').read_bytes()).hexdigest(),
         lock.read_text(), flags=re.M))
     locked_pods = digest(lock)
-    git = store.get('gitlab')
-    cmd.sensitive.add(git['token'])
-    host = urlsplit(c['gitlab_url']).hostname
-    if urlsplit(new).hostname != host:
-        raise SafeError('Native dependency URL must use the configured GitLab host.')
-    # Credential helper is scoped to this host and kept outside the checkout. No URL-embedded token.
-    helper = private_file(temp / 'git-credential-bento', '''#!/usr/bin/env python3
-import os,sys
-from urllib.parse import urlsplit
-d=dict(line.rstrip('\\n').split('=',1) for line in sys.stdin if '=' in line)
-if sys.argv[1]=='get' and d.get('protocol')=='https' and d.get('host')==os.environ['BENTO_GIT_HOST']:
- print('username=oauth2')
- print('password='+os.environ['BENTO_GIT_TOKEN'])
-''')
-    helper.chmod(0o700)
-    cmd.env.update(BENTO_GIT_TOKEN=git['token'], BENTO_GIT_HOST=urlsplit(c['gitlab_url']).netloc,
-        GIT_CONFIG_COUNT='2', GIT_CONFIG_KEY_0='credential.helper', GIT_CONFIG_VALUE_0='',
-        GIT_CONFIG_KEY_1='credential.helper', GIT_CONFIG_VALUE_1='!' + __import__('shlex').quote(str(helper)))
+    sources.authenticate(c, store, cmd, temp)
     cmd.run(['git', 'ls-remote', '--exit-code', new, 'refs/heads/auth-26-06-cocoapods'], capture=True,
-            label='Check mirrored iOS native dependency branch')
+            label='Check iOS native dependency branch')
     # The original boost patch accidentally depends on a relative path; prepare() fails if it cannot apply.
     cmd.run([pod, 'install', '--deployment'], repo / 'ios', label='Install locked CocoaPods dependencies')
     if digest(lock) != locked_pods:
@@ -409,14 +400,15 @@ def publish(c, store, directory, manifest):
 def build_signals():
     def terminate(*_):
         raise KeyboardInterrupt()
-    previous = signal.signal(signal.SIGTERM, terminate)
+    previous = {sig: signal.signal(sig, terminate) for sig in (signal.SIGTERM, signal.SIGHUP)}
     try:
         yield
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
-def execute_build(c, platform, repo, sha, pipeline, job, source='gitlab'):
+def execute_build(c, platform, repo, sha, pipeline, job, source='gitlab', canceled=None):
     """Caller owns the host lock; repo must be a disposable checkout."""
     if shutil.disk_usage(ROOT).free < c['minimum_free_gb'] * 1024 ** 3:
         raise SafeError('Insufficient free disk space; archive old artifacts or expand storage.')
@@ -425,7 +417,7 @@ def execute_build(c, platform, repo, sha, pipeline, job, source='gitlab'):
         if (ROOT / 'data/signing-recovery.json').exists():
             raise SafeError('Signing state needs ./bento recover-signing before another build.')
         temp = Path(tmp)
-        cmd = Commands(tool_env(c))
+        cmd = Commands(tool_env(c), canceled=canceled)
         cmd.env['PATH'] = str(Path(cmd.env['JAVA_HOME']) / 'bin') + os.pathsep + cmd.env['PATH'] if cmd.env.get('JAVA_HOME') else cmd.env['PATH']
         try:
             tools = prepare(c, store, cmd, repo, temp)
@@ -439,7 +431,8 @@ def execute_build(c, platform, repo, sha, pipeline, job, source='gitlab'):
             manifest = {'project': c['project_path'], 'branch': 'dev', 'environment': 'dev', 'brand': 'usbank',
                 'sha': sha, 'pipeline_id': pipeline, 'job_id': job, 'platform': platform, 'tools': tools,
                 'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'native': meta,
-                'distribution': 'none', 'qualification': 'native-build-only', 'source': source}
+                'distribution': 'none', 'qualification': 'native-build-only', 'source': source,
+                'source_provider': sources.provider(c), 'source_repository': sources.repository(c)}
             publish(c, store, output, manifest)
             print('Native build complete. Device installation and functional qualification are separate checks.', flush=True)
         finally:
@@ -451,6 +444,8 @@ def build(platform):
     if platform not in ('android', 'ios', 'validate'):
         raise SafeError('Unknown build platform.')
     c = load_config()
+    if sources.provider(c) != 'gitlab':
+        raise SafeError('GitLab CI jobs require source_provider gitlab.')
     if os.environ.get('CI_PROJECT_PATH') != c['project_path'] or os.environ.get('CI_COMMIT_BRANCH') != 'dev':
         raise SafeError('Build must run as a GitLab job for the configured project dev branch.')
     if os.environ.get('CI_COMMIT_REF_PROTECTED') != 'true':
@@ -483,21 +478,17 @@ def local_build(platform, source_path):
     if platform not in ('both', 'android', 'ios', 'validate'):
         raise SafeError('Choose both, android, ios, or validate.')
     if not source_path:
-        raise SafeError('Supply --repo /path/to/a/separate/GitLab/dev/checkout.')
+        raise SafeError('Supply --repo /path/to/a/separate/dev/checkout, or use ./bento run both to fetch the configured source.')
     c = load_config()
     source_repo = Path(source_path).expanduser().resolve()
     def git_read(*args):
         try:
             return subprocess.check_output(['git', '-C', str(source_repo), *args], text=True, stderr=subprocess.DEVNULL).strip()
         except (OSError, subprocess.CalledProcessError):
-            raise SafeError('The supplied checkout must contain a local dev branch and a GitLab origin.') from None
+            raise SafeError('The supplied checkout must contain a local dev branch and the configured source origin.') from None
     url = git_read('remote', 'get-url', 'origin')
-    allowed = (c['gitlab_url'] + '/' + c['project_path'] + '.git',
-               c['gitlab_url'] + '/' + c['project_path'],
-               'git@' + urlsplit(c['gitlab_url']).netloc + ':' + c['project_path'] + '.git',
-               'ssh://git@' + urlsplit(c['gitlab_url']).netloc + '/' + c['project_path'] + '.git')
-    if url not in allowed:
-        raise SafeError('Use a separate clone whose origin is the configured GitLab project, without credentials embedded in its URL.')
+    if url not in sources.allowed_origins(c):
+        raise SafeError('Use a separate clone whose origin is the configured source project, without credentials embedded in its URL.')
     sha = git_read('rev-parse', '--verify', 'refs/heads/dev^{commit}')
     selected = ('android', 'ios') if platform == 'both' else (platform,)
     print(f'Testing local dev commit {sha}. Only committed files are used; this command does not fetch.')
@@ -509,7 +500,8 @@ def local_build(platform, source_path):
         if run.exists() or (ROOT / 'data/artifacts' / ident).exists():
             raise SafeError('Test run ID already exists; retry the command.')
         run.mkdir(parents=True, mode=0o700)
-        record = {'id': ident, 'source': 'local', 'sha': sha, 'platforms': list(selected), 'status': 'running', 'jobs': {}}
+        record = {'id': ident, 'source': 'local', 'sha': sha, 'platforms': list(selected), 'status': 'running', 'jobs': {},
+            'source_provider': sources.provider(c), 'source_repository': sources.repository(c)}
         atomic_json(run / 'run.json', record)
         for index, target in enumerate(selected, 1):
             job = str(index)

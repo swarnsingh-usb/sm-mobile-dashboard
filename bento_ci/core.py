@@ -52,6 +52,8 @@ def load_config(path=None):
     for url in c['npm_registries']:
         https_url(url)
     https_url(c['ios']['native_dependencies_url'])
+    from .source import validate
+    validate(c)
     a = c['artifactory']
     if bool(a['url']) != bool(a['repository']):
         raise SafeError('Set both Artifactory URL and repository, or leave both empty for local storage.')
@@ -148,7 +150,7 @@ class Secrets:
                     raise ValueError()
                 required = {
                     'portal': ('username', 'password', 'session_key'),
-                    'gitlab': ('token',), 'runner': ('token',),
+                    'gitlab': ('token',), 'github': ('token',), 'runner': ('token',),
                     'dependencies': ('npm_token', 'maven_username', 'maven_password'),
                     'ios': ('p12_base64', 'p12_password', 'team_id', 'signing_identity'),
                     'android': ('keystore_base64', 'store_password', 'key_alias', 'key_password'),

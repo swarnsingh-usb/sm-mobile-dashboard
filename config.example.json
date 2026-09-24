@@ -1,4 +1,11 @@
 {
+  "source_provider": "gitlab",
+  "build_backend": "gitlab",
+  "github": {
+    "repository": "BentoInc/bento.mobileapp",
+    "transport": "ssh",
+    "ssh_key": ""
+  },
   "credential_source": "aws",
   "local_secrets_file": "local-secrets.json",
   "aws_region": "us-west-2",

@@ -31,12 +31,19 @@ sha=hashlib.sha256(payload).hexdigest()
 header=r'''#!/bin/bash
 set -euo pipefail
 umask 077
+BENTO_NEEDS_SOURCE=0
 for BENTO_ARG in "$@"; do
+  if [[ "$BENTO_NEEDS_SOURCE" == 1 ]]; then
+    case "$BENTO_ARG" in github|gitlab) BENTO_NEEDS_SOURCE=0; continue ;; *) echo 'Source must be github or gitlab.' >&2; exit 1 ;; esac
+  fi
   case "$BENTO_ARG" in
     --extract-only|--local|--no-start) ;;
-    *) echo 'Usage: bash bento-mac-ci-setup.sh [--extract-only] [--local] [--no-start]' >&2; exit 1 ;;
+    --source) BENTO_NEEDS_SOURCE=1 ;;
+    --source=github|--source=gitlab) ;;
+    *) echo 'Usage: bash bento-mac-ci-setup.sh [--extract-only] [--local] [--no-start] [--source github|gitlab]' >&2; exit 1 ;;
   esac
 done
+if [[ "$BENTO_NEEDS_SOURCE" == 1 ]]; then echo '--source requires github or gitlab.' >&2; exit 1; fi
 BENTO_SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 shopt -s dotglob nullglob
 for BENTO_FILE in *; do

@@ -1,10 +1,25 @@
 # Spend Management Mobile Dashboard — EC2 Mac pilot
 
-An internal build dashboard and GitLab runner package for `https://gitlab.us.bank-dns.com/BENTO/bento.mobileapp`, branch **dev**, AWS **us-west-2 (Oregon)**. It builds Android and iOS on the existing EC2 Mac and keeps outputs on its disk. Artifactory is optional until the repository is known.
+An internal Android/iOS build dashboard for **dev**, AWS **us-west-2 (Oregon)**. Source can be **GitHub `BentoInc/bento.mobileapp`** or **GitLab `BENTO/bento.mobileapp`**. A local Mac worker supports both sources; the original GitLab pipeline integration remains available. It builds Android and iOS on the existing EC2 Mac and keeps outputs on its disk. Artifactory is optional until the repository is known.
 
 **Host constraint: SSH/command line only; no GUI session.** Use the direct-build path below for the first test. View the web dashboard in your laptop's browser through an SSH tunnel. The current `services` implementation uses GUI LaunchAgents and does not meet this host's unattended-service requirement; do not use it on this host. Headless startup/reboot recovery and actual iOS signing still need qualification.
 
-**Milestone 1:** launch `both-dev`, produce a signed APK and a signed IPA from the same GitLab commit, follow logs, and download both from the dashboard. A successful native build is not proof of installation, login, push notifications, or store qualification. Neither platform is submitted to a store or tester service by this package.
+**Milestone 1:** launch `both-dev`, produce a signed APK and a signed IPA from the same pinned source commit, follow logs, and download both from the dashboard. A successful native build is not proof of installation, login, push notifications, or store qualification. Neither platform is submitted to a store or tester service by this package.
+
+## GitHub source while GitLab DNS is blocked
+
+From your existing dashboard clone on the EC2 Mac:
+
+```bash
+git pull --ff-only
+./bento configure --local
+./bento source github
+./bento check-source
+```
+
+If setup is incomplete, run `bash setup.sh --local --no-start --source github` first. Then follow [GITHUB.md](docs/GITHUB.md) for credentials, `./bento run both`, and the dashboard with `./bento serve` plus `./bento worker`. GitHub mode needs no GitLab service or AWS credential store. Both Android and iOS use the chosen source, including the private native dependency branch. The bank's Artifactory dependency host must still be reachable.
+
+Later, `./bento source gitlab` switches the source while retaining the same local worker and saved GitLab settings. Drain builds and restart the dashboard/worker after configuration changes. The GitLab pipeline instructions below apply only when explicitly selecting `--backend gitlab`.
 
 ## Install from GitHub over SSH
 
@@ -13,11 +28,11 @@ This repository contains the full application. After SSHing into the EC2 Mac, cl
 ```bash
 git clone git@github.com:swarnsingh-usb/sm-mobile-dashboard.git ~/sm-mobile-dashboard
 cd ~/sm-mobile-dashboard
-bash setup.sh --local --no-start
+bash setup.sh --local --no-start --source github
 ./bento credentials
 ```
 
-The Mac needs GitHub repository access to clone this source. Its GitHub credentials are separate from the GitLab credentials used to build the mobile app. `--local` defers AWS Secrets Manager; `--no-start` leaves the GUI-dependent service installer unused. Missing native prerequisites are reported by setup; resolve them and run `./bento doctor` before testing. The credential wizard is interactive and saves credentials only on the Mac, outside source control.
+The Mac needs access to both the dashboard repository and the selected mobile-app repository. GitHub SSH credentials can be reused only if they grant access to both. `--local` defers AWS Secrets Manager; `--no-start` leaves the GUI-dependent service installer unused. Missing native prerequisites are reported by setup; resolve them and run `./bento doctor` before testing. The credential wizard is interactive and saves credentials only on the Mac, outside source control.
 
 For the app checkout, exclusive Bitrise window, and `./bento test-build both` command, follow [LOCAL-TEST.md](docs/LOCAL-TEST.md). This dashboard repository is separate from the GitLab mobile-app repository.
 
@@ -43,7 +58,7 @@ Setup creates a private Python environment, downloads checksum-verified Node 20.
 
 It reuses the existing JDK 17, Android SDK 36/NDK 27.0.12077973, Xcode and Ruby/CocoaPods. It does **not** install/upgrade Xcode, change the global selected Xcode, accept licenses, replace Bitrise tools, create AWS resources, grant permissions, or push application code. Those require your bank's approved inputs. See [SETUP.md](docs/SETUP.md). Setup exits with code 2 when installed but blocked; rerun `bash setup.sh --local --no-start` after resolving the listed items.
 
-## Required bank-side inputs
+## Bank-side inputs for the optional GitLab pipeline backend
 
 1. An EC2 instance role that can read only the configured AWS Secrets Manager secrets, plus `kms:Decrypt` for a customer-managed key if used. Do not run `aws configure` with long-lived access keys.
 2. Five JSON secrets: portal login, GitLab API access, GitLab runner authentication, dependency repository credentials, and iOS signing. See [SECRETS.md](docs/SECRETS.md). Android managed signing is optional; the default preserves the repository's dev/debug signing.
@@ -51,7 +66,7 @@ It reuses the existing JDK 17, Android SDK 36/NDK 27.0.12077973, Xcode and Ruby/
 4. Review and commit `generated/gitlab-ci.yml` as the application's `.gitlab-ci.yml` on `dev`, or merge it with existing GitLab configuration. The installer cannot infer or override existing bank pipelines.
 5. The mirrored `auth-26-06-cocoapods` branch, private dependency access, and a complete trusted CA bundle where needed.
 
-## Later interactive dashboard pilot
+## Optional GitLab pipeline dashboard pilot
 
 For the first direct build, follow LOCAL-TEST.md. For a later interactive dashboard pilot after setup, credentials and committing the pipeline, check `./bento doctor --online`. Run the following foreground commands in two separate SSH sessions, each from the installation directory:
 
@@ -105,6 +120,6 @@ This is a **bounded pilot**, not full Bitrise workflow parity. Production, all l
 
 ## Repository baseline and verification limits
 
-Code was derived from local `bento.mobileapp` dev commit `a81bb52e72c6f2705488030f8641ea90d47fedf2` (2026-09-14). A fresh GitHub fetch on 2026-09-24 returned `Repository not found`. The bank GitLab checkout, EC2 host, IAM, signing assets, native compilation, and Artifactory service were **not accessed or qualified here**. The first real native builds must run in the bank environment.
+The original baseline was `a81bb52e72c6f2705488030f8641ea90d47fedf2`. On 2026-09-24, fetching with the work SSH identity succeeded and local dev was fast-forwarded to `87da4ea4` for review. Native build files and install/patch scripts were unchanged; package dependencies/lockfile have advanced. The new GitHub source check verified both dev and the native dependency branch from this developer laptop, not the EC2 Mac. The bank GitLab checkout, EC2 host, IAM, signing assets, native compilation, and Artifactory service were **not accessed or qualified here**. The first real native builds must run in the bank environment.
 
 See [VERIFICATION.md](docs/VERIFICATION.md) for local tests and the live acceptance checklist. See [WORKFLOW-MAP.md](docs/WORKFLOW-MAP.md) for current versus migrated workflow behavior.

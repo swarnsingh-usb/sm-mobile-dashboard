@@ -2,11 +2,11 @@
 
 Verified locally 2026-09-24. Bank-host qualification remains pending.
 
-Host clarification: the EC2 Mac is SSH-only with no GUI session. Documentation now uses local/no-start installation and foreground commands for the interactive pilot. The existing GUI LaunchAgent service implementation does not meet the unattended host requirement. No headless startup, reboot recovery, or signed iOS build has been qualified. This clarification changed guidance only, not the previously tested build code.
+Host clarification: the EC2 Mac is SSH-only with no GUI session. Documentation now uses local/no-start installation and foreground commands for the interactive pilot. The existing GUI LaunchAgent service implementation does not meet the unattended host requirement. No headless startup, reboot recovery, or signed iOS build has been qualified. The GitHub/local-worker update adds a foreground execution path suitable for SSH, but unattended startup and native SSH signing still need target-host qualification.
 
 ## Local checks
 
-**33 tests passed.** See `test-results.txt` for the actual local run. The tests cover API authentication/CSRF, launch idempotency including uncertain upstream responses, pipeline scoping, local artifact access/path checks, Artifactory upload success/failure/checksum mismatch, secret redaction, failed commands, Bitrise restart cancellation, window expiry, exclusive lock release, runner registration/token handling, generated pipeline gates, iOS profile/temporary-keychain cleanup and restoration failure.
+**54 tests passed.** See `test-results.txt` for the actual local run. The tests cover API authentication/CSRF, launch idempotency including uncertain upstream responses, pipeline scoping, local artifact access/path checks, Artifactory upload success/failure/checksum mismatch, secret redaction, failed commands, Bitrise restart cancellation, window expiry, exclusive lock release, runner registration/token handling, generated pipeline gates, iOS profile/temporary-keychain cleanup and restoration failure.
 
 The nine added local-mode tests verify that AWS client creation is forbidden, local credentials refresh from disk, permissive files/symlinks/invalid schemas are rejected without exposing values, signing assets load by path, switching modes preserves configuration, the credential wizard keeps private fields out of output, local setup never registers/starts services, and SSH tests preserve the source checkout while selecting the same commit for both platforms. Actual temporary Git repositories exercise copying and commit selection; native compilation is stubbed. Failure records and the existing CI/protected-dev/window guards are also checked.
 
@@ -24,11 +24,21 @@ These tests use fake GitLab/Secrets Manager/Artifactory responses. They do not d
 
 To reproduce local tests: create a Python 3.10+ virtualenv, install `requirements-dev.txt`, and run `python -m pytest -q`. Native tools and cloud credentials are not required by these unit/integration-fixture tests.
 
+## GitHub source and local worker update
+
+On 2026-09-24 the new source checker read GitHub dev `87da4ea430ae` and native dependency branch `3bcb0eaeeb2b` using the work SSH identity from this developer laptop. The app checkout was fast-forwarded for review; native build/patch files did not change. EC2 networking and native builds were not tested.
+
+The 21 added tests cover legacy config defaults, preserving GitLab settings/secrets while switching sources, SSH without source tokens, HTTPS helper host/repository scoping, frozen iOS dependency revisions across providers, GitHub credential prompts, source-origin validation, no GitLab runner installation/registration in local mode, dashboard credential setup, and the durable local worker. Real temporary Git repositories test fetching/pinning dev, per-platform checkout isolation, source advancement between platforms, fail-fast/cancel/window expiry, worker exclusivity, interruption guard, persisted UI history/logs/downloads and reuse of the same worker with GitLab source. Native compilation and external uploads remain mocked. Local mode forbids AWS initialization, and local-backend API tests forbid GitLab API construction.
+
+Browser checks using `tests/preview.py --local` confirmed GitHub labeling, local run/job details, synthetic logs and artifact links, launch into the real local queue, and queued cancellation without a GitLab backend. The preview is explicitly synthetic and does not execute builds. Existing GitLab-backend tests continue to pass.
+
+The packaged installer was refreshed and checked for source integrity, nonempty-directory refusal, corrupted-payload rejection, private-file exclusion, and forwarding `--local --no-start --source github`. See `github-installer-test-results.txt`. Pinned dependency installation was not repeated; dependencies are unchanged.
+
 ## Required live SSH test acceptance
 
-- Local dependency/GitLab credentials and signing files work on the EC2 Mac; no Secrets Manager access is required.
+- Local dependency/selected-source credentials and signing files work on the EC2 Mac; no Secrets Manager access is required.
 - `./bento doctor` passes the actual native tool checks; Bitrise is drained/stopped for the window.
-- `./bento test-build both --repo /path/to/separate-gitlab-checkout` produces both native outputs from the same recorded local dev commit.
+- `./bento run both` produces both native outputs from one fetched dev commit, or `./bento test-build both --repo /path/to/separate-checkout` uses a reviewed local dev commit.
 - Validate/download both artifacts, inspect manifests and logs, confirm keychain/profile restoration and the unchanged source checkout, then resume the existing Bitrise baseline.
 - A signed iOS build from the SSH session has been proven on the target host; local fixtures do not establish this.
 
@@ -41,7 +51,7 @@ To reproduce local tests: create a Python 3.10+ virtualenv, install `requirement
 - Launch both-dev. Both jobs build the exact recorded SHA and explicit usbank/dev environment.
 - Android APK package ID, version/build and signature are verified; iOS archive/export identity/signature/profile/entitlements are appropriate.
 - Download both outputs and compare local SHA-256 with manifest. If Artifactory is enabled, confirm server checksum and access permissions.
-- Verify failure/cancellation, keychain restoration, expired-window blocking, artifact survival and GUI-session behavior after reboot.
+- Verify failure/cancellation, keychain restoration, expired-window blocking, artifact survival and an approved SSH-only service/reboot recovery design.
 - Resume Bitrise and run its known baseline to demonstrate coexistence has preserved its behavior.
 
 Device installation, login, push, deep links, performance and production/store qualification follow as separate evidence.

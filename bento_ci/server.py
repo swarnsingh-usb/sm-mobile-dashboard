@@ -15,6 +15,8 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from .core import ROOT, WORKFLOWS, GitLab, SafeError, Secrets, artifact_dir, load_config
 from .locking import check_window
+from . import source as sources
+from .local_runner import LocalRuns
 
 
 def create_app(config=None, secret_store=None, gitlab=None, root=ROOT):
@@ -29,7 +31,8 @@ def create_app(config=None, secret_store=None, gitlab=None, root=ROOT):
     app.config.update(SECRET_KEY=credentials['session_key'], MAX_CONTENT_LENGTH=8192,
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Strict',
         SESSION_COOKIE_SECURE=c['public_url'].startswith('https:'), PERMANENT_SESSION_LIFETIME=28800)
-    gl = gitlab or GitLab(c, store)
+    local = LocalRuns(c, root) if c.get('build_backend', 'gitlab') == 'local' else None
+    gl = None if local else (gitlab or GitLab(c, store))
     rate = {}
     rate_lock = threading.Lock()
     dbpath = root / 'data/requests.sqlite3'
@@ -118,13 +121,16 @@ def create_app(config=None, secret_store=None, gitlab=None, root=ROOT):
             reason = ''
         except SafeError as e:
             window, ready, reason = {}, False, str(e)
-        return jsonify(project=c['project_path'], branch='dev', workflows=WORKFLOWS,
+        return jsonify(project=sources.repository(c), source_provider=sources.provider(c),
+            backend=c.get('build_backend', 'gitlab'), branch='dev', workflows=WORKFLOWS,
             csrf=session['csrf'], storage='Artifactory + Mac' if c['artifactory']['url'] else 'Mac disk',
             window=window, ready=ready, reason=reason)
 
     @app.get('/api/builds')
     @authenticated
     def builds():
+        if local:
+            return jsonify(local.builds()[:50])
         rows = gl.project_call('GET', '/pipelines', params={'ref': 'dev', 'per_page': 50, 'order_by': 'id', 'sort': 'desc'})
         # Pipeline names are set by the generated YAML. Verify the marker again for actions.
         return jsonify([r for r in rows if (r.get('name') or '').startswith('Bento Mac / ')])
@@ -148,7 +154,7 @@ def create_app(config=None, secret_store=None, gitlab=None, root=ROOT):
                 if old[1]:
                     return jsonify(json.loads(old[1]))
                 return jsonify(error='This launch is pending or its result is unknown. Check build history before launching another.'), 409
-        result = gl.launch(workflow, key)
+        result = (local or gl).launch(workflow, key)
         with sqlite3.connect(dbpath) as db:
             db.execute('UPDATE launches SET result=? WHERE request_id=?', (json.dumps(result), key))
         return jsonify(result), 201
@@ -156,10 +162,11 @@ def create_app(config=None, secret_store=None, gitlab=None, root=ROOT):
     @app.get('/api/builds/<int:ident>')
     @authenticated
     def detail(ident):
-        p = gl.pipeline(ident)
-        jobs = gl.project_call('GET', f'/pipelines/{ident}/jobs', params={'per_page': 100, 'include_retried': 'true'})
+        p = (local or gl).pipeline(ident)
+        jobs = p['jobs'] if local else gl.project_call('GET', f'/pipelines/{ident}/jobs', params={'per_page': 100, 'include_retried': 'true'})
         for job in jobs:
             job['artifacts_local'] = local_manifests(ident, job['id'])
+            job['retry_allowed'] = not bool(local)
         return jsonify(pipeline=p, jobs=jobs)
 
     def local_manifests(pipeline, job):
@@ -181,6 +188,8 @@ def create_app(config=None, secret_store=None, gitlab=None, root=ROOT):
     @app.get('/api/jobs/<int:ident>/log')
     @authenticated
     def log(ident):
+        if local:
+            return app.response_class(local.log(ident), mimetype='text/plain')
         pilot_job(ident)
         trace = gl.project_call('GET', f'/jobs/{ident}/trace', raw=True)
         # Full trace remains available in GitLab; keep browser refreshes bounded.
@@ -189,12 +198,16 @@ def create_app(config=None, secret_store=None, gitlab=None, root=ROOT):
     @app.post('/api/builds/<int:ident>/cancel')
     @authenticated
     def cancel(ident):
+        if local:
+            return jsonify(local.cancel(ident))
         gl.pipeline(ident)
         return jsonify(gl.project_call('POST', f'/pipelines/{ident}/cancel'))
 
     @app.post('/api/jobs/<int:ident>/retry')
     @authenticated
     def retry(ident):
+        if local:
+            raise SafeError('Launch a new workflow for a fresh dev commit. Local jobs are never silently retried.')
         check_window(root)
         pilot_job(ident)
         return jsonify(gl.project_call('POST', f'/jobs/{ident}/retry'))

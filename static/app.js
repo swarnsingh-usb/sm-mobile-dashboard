@@ -13,7 +13,7 @@ function status(value) { return text('span', value, 'status ' + value.replace(/[
 async function meta() {
   const m = await api('/api/meta'); csrf=m.csrf;
   el('login').hidden=true; el('workspace').hidden=false; el('logout').hidden=false;
-  el('project').textContent=m.project; el('storage').textContent=m.storage;
+  el('project').textContent=`${m.source_provider === 'github' ? 'GitHub' : 'GitLab'} · ${m.project}`; el('storage').textContent=m.storage;
   if(!el('workflow').options.length) {for(const [key,value] of Object.entries(m.workflows)) {const o=text('option',value); o.value=key; el('workflow').append(o);} el('workflow').value='both-dev';}
   el('window').textContent=m.ready ? 'Pilot window open until ' + new Date(m.window.expires_at*1000).toLocaleTimeString() + '. Keep Bitrise stopped until the new jobs finish.' : m.reason;
   el('window').className='notice'+(m.ready?' ready':''); el('run').disabled=!m.ready;
@@ -32,11 +32,12 @@ function artifacts(container, manifests) {
 async function detail() {
   if(!selected)return;
   const d=await api(`/api/builds/${selected}`);
-  el('detail-title').textContent=`Run #${selected} · ${d.pipeline.status}`;el('detail-empty').hidden=true;
+  el('detail-title').textContent=`Run #${selected} · ${d.pipeline.status}`;
+  el('detail-empty').hidden=!d.pipeline.error;el('detail-empty').textContent=d.pipeline.error || '';
   el('cancel').hidden=!['running','pending','created','preparing'].includes(d.pipeline.status);
   el('jobs').replaceChildren(); const ms=[];
   for(const j of d.jobs){const row=text('div','','job');const button=text('button',j.name);button.append(status(j.status));button.onclick=()=>{selectedJob=j.id;loadLog().catch(e=>message(e.message));};row.append(button);
-    if(['failed','canceled'].includes(j.status)){const retry=text('button','Retry');retry.onclick=async()=>{try{retry.disabled=true;await api(`/api/jobs/${j.id}/retry`,{method:'POST',body:'{}'});await refresh();}catch(e){message(e.message);}finally{retry.disabled=false;}};row.append(retry);}
+    if(j.retry_allowed !== false && ['failed','canceled'].includes(j.status)){const retry=text('button','Retry');retry.onclick=async()=>{try{retry.disabled=true;await api(`/api/jobs/${j.id}/retry`,{method:'POST',body:'{}'});await refresh();}catch(e){message(e.message);}finally{retry.disabled=false;}};row.append(retry);}
     el('jobs').append(row);ms.push(...j.artifacts_local);}
   artifacts(el('artifact-list'),ms);
   if(!selectedJob && d.jobs.length)selectedJob=d.jobs[0].id;

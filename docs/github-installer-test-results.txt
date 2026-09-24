@@ -1,0 +1,8 @@
+GitHub installer checks, 2026-09-24
+PASS: extracted 43 source files; all SHA-256 checksums match.
+PASS: nonempty directory refused without overwrite.
+PASS: corrupted payload rejected before extraction.
+PASS: --local --no-start --source github forwarded unchanged to stub setup; no installation ran.
+PASS: missing/invalid source argument rejected.
+PASS: ZIP excludes private configuration, credentials, signing assets, Git history and installed/runtime files.
+Native builds and EC2 access were not exercised.

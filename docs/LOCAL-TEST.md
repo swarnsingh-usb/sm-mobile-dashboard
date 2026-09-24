@@ -1,5 +1,7 @@
 # First build over SSH, without AWS Secrets Manager
 
+**GitLab DNS blocked?** Follow [GITHUB.md](GITHUB.md) first. It provides GitHub source selection, remote `dev` builds with `./bento run both`, and a dashboard/worker that do not contact GitLab. The separate-checkout path below remains supported for either selected provider.
+
 This path runs Android and iOS builds directly from the Mac terminal. It needs no AWS secrets, EC2 role, GitLab runner registration, pipeline commit, or dashboard login. It still needs access to the private dependency repositories and the existing iOS signing certificate/private key and provisioning profiles. Use the approved credentials you already have; this package does not extract them from Bitrise.
 
 ## 1. Copy the installer from your laptop
@@ -41,7 +43,7 @@ Already extracted/installed? Run `bash setup.sh --local --no-start`. To change a
 ./bento credentials
 ```
 
-The interactive wizard collects npm/Maven access, a GitLab token, and iOS signing inputs. Passwords and tokens use hidden prompts. It writes `local-secrets.json` beside `config.json` with owner-only permissions (0600). Certificate/profile inputs are file paths on the Mac; you do not need to base64-encode them. Relative paths are relative to the credential file, not the app checkout. The credentials and signing files are excluded from the packaged installer and ignored by source control.
+The interactive wizard collects npm/Maven access, the selected source token when needed, and iOS signing inputs. GitHub SSH mode does not ask for a GitLab or GitHub token. Passwords and tokens use hidden prompts. It writes `local-secrets.json` beside `config.json` with owner-only permissions (0600). Certificate/profile inputs are file paths on the Mac; you do not need to base64-encode them. Relative paths are relative to the credential file, not the app checkout. The credentials and signing files are excluded from the packaged installer and ignored by source control.
 
 For the direct test, GitLab repository-read access is sufficient for the mirrored CocoaPods branch. The later dashboard needs the broader project API access described in SECRETS.md. No runner or portal credential is needed yet.
 

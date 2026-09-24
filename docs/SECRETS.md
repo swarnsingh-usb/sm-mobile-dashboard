@@ -90,3 +90,9 @@ Grant deploy and read access to the chosen generic local repository/prefix. Excl
 An EC2 instance profile is a **host-level** trust boundary; different Unix accounts do not automatically receive different AWS permissions. Protected dev code and dependency install scripts are trusted in this pilot. Do not enable arbitrary branch/MR jobs on this persistent credential-bearing machine. SDK reads are cached for five minutes, and build signing/dependency reads force refresh. Neither the application nor tests create AWS secrets or roles automatically.
 
 Sources: [AWS Secrets Manager retrieval](https://docs.aws.amazon.com/secretsmanager/latest/userguide/retrieving-secrets.html), [IAM permissions](https://docs.aws.amazon.com/secretsmanager/latest/userguide/auth-and-access_iam-policies.html), [GitLab runner security](https://docs.gitlab.com/runner/security/).
+
+## Source and orchestration selection
+
+GitHub SSH source uses the build user's approved SSH key/agent; it does not read a GitLab, GitHub-token or runner secret. With `github.transport: https`, add a `github` JSON section containing `token` in local mode, or provision the secret referenced by `secrets.github` in AWS mode. GitLab source keeps using `gitlab.token`. Source switching never copies credentials between providers.
+
+The local Mac worker requires no hosted-CI API/runner secret. Dashboard access requires `portal`; in local mode `./bento portal-credentials` creates that section with hidden password input and a generated session key. Dependency and platform signing requirements remain the same. See [GITHUB.md](GITHUB.md).

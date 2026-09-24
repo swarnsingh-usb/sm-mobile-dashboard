@@ -33,15 +33,31 @@ class GitLab:
 
 if __name__=='__main__':
     config=json.loads((ROOT/'config.example.json').read_text());config['public_url']='http://localhost:8876';config['port']=8876
+    local = '--local' in sys.argv
+    if local:
+        config.update(source_provider='github', build_backend='local', credential_source='local')
     import bento_ci.locking
     bento_ci.locking.bitrise_processes=lambda:[]
     with tempfile.TemporaryDirectory(prefix='bento-preview-') as directory:
         root=Path(directory)
         atomic_json(root/'data/pilot-window.json',{'expires_at':time.time()+7200})
+        pipeline='1042'
+        if local:
+            from bento_ci.local_runner import LocalRuns
+            runs=LocalRuns(config,root)
+            row=runs.launch('both-dev','synthetic-preview')
+            pipeline=str(row['id'])
+            row.update(status='success',sha='a81bb52e72c6f2705488030f8641ea90d47fedf2')
+            for item in row['jobs']:
+                item['status']='success'
+                (runs.folder(row['id'])/(item['name']+'.log')).write_text('SYNTHETIC PREVIEW: no native build ran.\nGitHub source selected. Artifacts saved on Mac disk.\n')
+            runs.save(row)
         for platform,job,name in [('android','2111','spendmanagement-dev.apk'),('ios','2112','SpendManagement-dev.ipa')]:
-            folder=root/'data/artifacts/1042'/job/platform;folder.mkdir(parents=True)
+            if local:
+                job=str(next(j['id'] for j in row['jobs'] if j['name']==platform))
+            folder=root/'data/artifacts'/pipeline/job/platform;folder.mkdir(parents=True)
             (folder/name).write_bytes(b'Synthetic artifact for browser tests only.')
-            atomic_json(folder/'manifest.json',{'project':'BENTO/bento.mobileapp','pipeline_id':'1042','job_id':job,'platform':platform,
+            atomic_json(folder/'manifest.json',{'project':'BENTO/bento.mobileapp','pipeline_id':pipeline,'job_id':job,'platform':platform,
                 'sha':'a81bb52e72c6f2705488030f8641ea90d47fedf2','environment':'dev','storage':'local','upload_status':'disabled',
                 'native':{'signing':'synthetic-test'},'files':[{'name':name,'bytes':40,'sha256':'demo'}]})
         from waitress import serve

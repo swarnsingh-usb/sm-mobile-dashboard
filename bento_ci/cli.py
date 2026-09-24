@@ -19,6 +19,7 @@ import requests
 
 from .core import ROOT, GitLab, SafeError, Secrets, atomic_json, digest, load_config
 from .locking import bitrise_processes, open_window
+from . import source as sources
 
 
 def ask(label, default=''):
@@ -26,15 +27,20 @@ def ask(label, default=''):
     return answer or default
 
 
-def configure(local=False):
+def configure(local=False, source=None):
     path = ROOT / 'config.json'
     if path.exists():
-        if local:
+        if local or source:
             c = json.loads(path.read_text())
-            c['credential_source'] = 'local'
+            if local:
+                c['credential_source'] = 'local'
             c.setdefault('local_secrets_file', 'local-secrets.json')
+            if source:
+                sources.defaults(c)
+                c['source_provider'] = source
+                c['build_backend'] = 'local'
             atomic_json(path, c)
-        print('Existing config.json preserved. Edit it directly to change settings.')
+        print('Existing tool paths and GitLab settings preserved.' + (f' Source selected: {source}.' if source else ''))
         if local:
             print('Credential source set to local; AWS is not used.')
         return load_config()
@@ -42,11 +48,19 @@ def configure(local=False):
     if not sys.stdin.isatty():
         raise SafeError('Copy config.example.json to config.json and edit it, or run setup interactively.')
     c['credential_source'] = 'local' if local else 'aws'
+    sources.defaults(c)
+    if source:
+        c['source_provider'] = source
+        c['build_backend'] = 'local'
     print('Local credential mode: run ./bento credentials after setup.' if local else
           'Configuration contains secret references only. Put secret values in AWS Secrets Manager, not here.')
     c['aws_region'] = ask('AWS region', c['aws_region'])
-    c['gitlab_url'] = ask('GitLab base URL', c['gitlab_url'])
-    c['project_path'] = ask('GitLab project path', c['project_path'])
+    if sources.provider(c) == 'gitlab':
+        c['gitlab_url'] = ask('GitLab base URL', c['gitlab_url'])
+        c['project_path'] = ask('GitLab project path', c['project_path'])
+    else:
+        c['github']['repository'] = ask('GitHub app repository', c['github']['repository'])
+        c['github']['ssh_key'] = ask('GitHub SSH private key path (empty uses your SSH configuration)')
     c['ca_bundle'] = ask('Full PEM CA bundle path, if required by the bank')
     c['toolchain']['android_sdk'] = ask('Existing Android SDK directory', os.environ.get('ANDROID_HOME', c['toolchain']['android_sdk']))
     try:
@@ -66,7 +80,10 @@ def configure(local=False):
     c['toolchain']['expected_pod'] = ask('Qualified CocoaPods version', c['toolchain']['expected_pod'])
     c['ios']['native_dependencies_url'] = c['gitlab_url'] + '/' + c['project_path'] + '.git'
     if not local:
-        for name in ('portal', 'gitlab', 'runner', 'dependencies', 'ios'):
+        names = ['portal', 'dependencies', 'ios']
+        if sources.credential_name(c): names.append(sources.credential_name(c))
+        if c['build_backend'] == 'gitlab': names.append('runner')
+        for name in names:
             c['secrets'][name] = ask(f'Secrets Manager name/ARN for {name}', c['secrets'][name])
         c['secrets']['android'] = ask('Optional Android signing secret; empty preserves repository dev signing')
     c['artifactory']['url'] = ask('Optional artifact storage URL, ending /artifactory; empty means Mac disk')
@@ -75,6 +92,48 @@ def configure(local=False):
         c['secrets']['artifactory'] = 'artifactory' if local else ask('Artifactory upload token secret', 'bento/mac-ci/artifactory')
     atomic_json(path, c)
     return load_config()
+
+
+def select_source(name, backend=None, ssh_key=None, transport=None):
+    if name not in ('github', 'gitlab'):
+        raise SafeError('Choose ./bento source github or ./bento source gitlab.')
+    path = ROOT / 'config.json'
+    c = load_config()
+    c.pop('_config_dir', None)
+    c['source_provider'] = name
+    c['build_backend'] = backend or ('local' if name == 'github' else c['build_backend'])
+    if ssh_key is not None: c['github']['ssh_key'] = str(Path(ssh_key).expanduser()) if ssh_key else ''
+    if transport is not None: c['github']['transport'] = transport
+    sources.validate(c)
+    atomic_json(path, c)
+    print(f'Source: {sources.clone_url(c)}; build backend: {c["build_backend"]}.')
+    print('GitLab settings and all credentials retained. Restart the idle dashboard/worker to apply this choice.')
+
+
+def check_source(c):
+    from .build import Commands, tool_env
+    with tempfile.TemporaryDirectory(dir=ROOT / 'runtime') as tmp:
+        sources.check_remote(c, Secrets(c), Commands(tool_env(c), monitor_bitrise=False), Path(tmp))
+
+
+def portal_credentials(c):
+    if c.get('credential_source') != 'local' or not sys.stdin.isatty():
+        raise SafeError('Use ./bento portal-credentials in an interactive terminal with local credential mode.')
+    path = Secrets(c).local_path()
+    if path.exists() and (path.is_symlink() or path.stat().st_uid != os.getuid() or path.stat().st_mode & 0o077):
+        raise SafeError('Local credential file must be owned by this user, chmod 600, and not a symlink.')
+    values = json.loads(path.read_text()) if path.exists() else {}
+    old = values.get('portal', {})
+    user = ask('Dashboard username', old.get('username', 'engineer'))
+    password = getpass.getpass('Dashboard password (at least 24 characters; Enter keeps existing): ') or old.get('password', '')
+    if not user or len(password) < 24:
+        raise SafeError('Choose a username and a password of at least 24 characters.')
+    import secrets
+    session_key = old.get('session_key', '')
+    values['portal'] = dict(username=user, password=password,
+                           session_key=session_key if len(session_key) >= 32 else secrets.token_urlsafe(48))
+    atomic_json(path, values)
+    print('Dashboard login saved privately. Restart the dashboard if it is running.')
 
 
 def credentials(c):
@@ -92,7 +151,10 @@ def credentials(c):
     else:
         values = {}
     print('Credentials stay in a private local JSON file. Hidden prompts accept Enter to keep an existing value.')
-    for name, fields in (('dependencies', ('npm_token', 'maven_username', 'maven_password')), ('gitlab', ('token',))):
+    sections = [('dependencies', ('npm_token', 'maven_username', 'maven_password'))]
+    source_credential = sources.credential_name(c)
+    if source_credential: sections.append((source_credential, ('token',)))
+    for name, fields in sections:
         value = values.setdefault(name, {})
         for field in fields:
             value[field] = getpass.getpass(f'{name}.{field}: ') or value.get(field, '')
@@ -111,7 +173,7 @@ def credentials(c):
         ios['export_options'] = {'method': method, 'destination': 'export', 'teamID': ios['team_id'],
             'signingStyle': 'manual', 'provisioningProfiles': {c['ios']['bundle_id']: profile}}
     atomic_json(path, values)
-    for name in ('dependencies', 'gitlab', 'ios'):
+    for name in ['dependencies', 'ios'] + ([source_credential] if source_credential else []):
         store.get(name, fresh=True)
     print('Local build credentials saved with mode 0600. No AWS service was contacted. See docs/LOCAL-TEST.md.')
 
@@ -156,7 +218,8 @@ def install_tools():
                 raise SafeError('Yarn download integrity check failed.')
             subprocess.run(['/usr/bin/tar', '-xzf', str(temp / 'yarn.tgz'), '-C', str(temp)], check=True)
             shutil.move(temp / 'package', tools / 'yarn')
-        if not (tools / 'gitlab-runner').exists():
+        need_runner = not (ROOT / 'config.json').exists() or load_config()['build_backend'] == 'gitlab'
+        if need_runner and not (tools / 'gitlab-runner').exists():
             version = 'v19.4.1'
             name = 'gitlab-runner-darwin-' + ('arm64' if arch == 'arm64' else 'amd64')
             base = 'https://gitlab-runner-downloads.s3.amazonaws.com/' + version
@@ -167,7 +230,7 @@ def install_tools():
                 raise SafeError('GitLab runner download checksum failed.')
             shutil.move(temp / name, tools / 'gitlab-runner')
             (tools / 'gitlab-runner').chmod(0o700)
-    print('Private Node 20.19.4, Yarn 1.22.22, and GitLab Runner 19.4.1 installed. Existing Bitrise tools unchanged.')
+    print('Private Node 20.19.4 and Yarn 1.22.22 ready.' + (' GitLab Runner 19.4.1 ready.' if need_runner else ' Local backend needs no GitLab Runner.'))
 
 
 def generate(c):
@@ -331,7 +394,10 @@ def doctor(c, online=False, build_only=False):
         failures.append('signing recovery')
     if online:
         store = Secrets(c)
-        names = ('gitlab', 'dependencies', 'ios') if build_only else ('portal', 'gitlab', 'runner', 'dependencies', 'ios')
+        names = ['dependencies', 'ios']
+        if sources.credential_name(c): names.append(sources.credential_name(c))
+        if not build_only: names.append('portal')
+        if not build_only and c.get('build_backend', 'gitlab') == 'gitlab': names.append('runner')
         for name in names:
             try:
                 store.get(name, fresh=True)
@@ -340,15 +406,18 @@ def doctor(c, online=False, build_only=False):
                 failures.append('secret ' + name)
                 print(f'Secret {name}: unavailable')
         try:
-            gl = GitLab(c, store)
-            b = gl.project_call('GET', '/repository/branches/dev')
-            print('GitLab dev: ' + b['commit']['id'][:12])
-            if not build_only and not b.get('protected'):
-                failures.append('dev is not protected')
-            gl.project_call('GET', '/repository/branches/auth-26-06-cocoapods')
-            print('Native dependency branch: present')
+            if c.get('build_backend', 'gitlab') == 'local' or build_only:
+                check_source(c)
+            else:
+                gl = GitLab(c, store)
+                b = gl.project_call('GET', '/repository/branches/dev')
+                print('GitLab dev: ' + b['commit']['id'][:12])
+                if not build_only and not b.get('protected'):
+                    failures.append('dev is not protected')
+                gl.project_call('GET', '/repository/branches/auth-26-06-cocoapods')
+                print('Native dependency branch: present')
         except SafeError as e:
-            failures.append('GitLab access/dependency branch')
+            failures.append('source access/dependency branch')
             print(str(e))
     print('Artifactory: ' + ('configured; actual write/checksum verified during build' if c['artifactory']['url'] else 'disabled; artifacts retained on Mac disk'))
     print('Preflight result: ' + ('BLOCKED: ' + ', '.join(failures) if failures else 'Local checks passed; native builds still require live qualification.'))
@@ -376,12 +445,17 @@ def recover():
 def main():
     os.umask(0o077)
     p = argparse.ArgumentParser(description='Bento Mac CI')
-    p.add_argument('command', choices=['setup','configure','credentials','test-build','tools','generate','register','services','doctor','serve','runner','build','open-window','close-window','recover-signing','install-pipeline'])
+    p.add_argument('command', choices=['setup','configure','source','check-source','portal-credentials','run','worker','credentials','test-build','tools','generate','register','services','doctor','serve','runner','build','open-window','close-window','recover-signing','install-pipeline'])
     p.add_argument('argument', nargs='?')
     p.add_argument('--online', action='store_true')
     p.add_argument('--no-start', action='store_true')
     p.add_argument('--local', action='store_true', help='Read credentials locally instead of AWS; setup leaves services stopped')
-    p.add_argument('--repo', help='Separate GitLab app checkout containing the local dev branch')
+    p.add_argument('--source', choices=['github', 'gitlab'])
+    p.add_argument('--backend', choices=['local', 'gitlab'])
+    p.add_argument('--transport', choices=['ssh', 'https'])
+    p.add_argument('--ssh-key', help='Optional GitHub private key path; never the key contents')
+    p.add_argument('--once', action='store_true', help='Worker drains current pending runs and exits')
+    p.add_argument('--repo', help='Separate configured app checkout containing the local dev branch')
     p.add_argument('--build-only', action='store_true', help='Skip portal/runner credential and protected-branch checks in doctor')
     p.add_argument('--minutes', type=int, default=120)
     args = p.parse_args()
@@ -389,23 +463,33 @@ def main():
         (ROOT / name).mkdir(parents=True, exist_ok=True)
     try:
         if args.command == 'setup':
-            c = configure(local=args.local)
+            c = configure(local=args.local, **({'source': args.source} if args.source else {}))
             install_tools()
             generate(c)
             blocked = doctor(c)
-            if not args.no_start and not args.local:
+            if not args.no_start and not args.local and c.get('build_backend', 'gitlab') == 'gitlab':
                 try:
                     register(c)
                     service('start')
                 except SafeError as e:
                     print('Service startup pending: ' + str(e))
                     blocked = True
-            print('Package installed. ' + ('Run ./bento credentials, then follow docs/LOCAL-TEST.md for SSH builds.' if args.local else
-                'Read README.md and docs/SECRETS.md. Add generated/gitlab-ci.yml to GitLab dev before a dashboard run.'))
+            if c.get('build_backend', 'gitlab') == 'local':
+                print('Package installed. Follow docs/GITHUB.md for source checks, credentials, ./bento run both and the dashboard worker.')
+            else:
+                print('Package installed. ' + ('Run ./bento credentials, then follow docs/LOCAL-TEST.md for SSH builds.' if args.local else
+                    'Read README.md and docs/SECRETS.md. Add generated/gitlab-ci.yml to GitLab dev before a dashboard run.'))
             if blocked:
                 print('Native build prerequisites are missing; resolve the items above and run ./bento doctor.')
                 return 2
-        elif args.command == 'configure': configure(local=args.local)
+        elif args.command == 'configure': configure(local=args.local, source=args.source)
+        elif args.command == 'source': select_source(args.argument, args.backend, args.ssh_key, args.transport)
+        elif args.command == 'check-source': check_source(load_config())
+        elif args.command == 'portal-credentials': portal_credentials(load_config())
+        elif args.command in ('run', 'worker'):
+            from .local_runner import worker
+            workflow = (args.argument or 'both').removesuffix('-dev') + '-dev' if args.command == 'run' else None
+            worker(once=args.once, workflow=workflow)
         elif args.command == 'credentials': credentials(load_config())
         elif args.command == 'test-build':
             from .build import local_build
