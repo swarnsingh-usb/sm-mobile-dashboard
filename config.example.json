@@ -1,0 +1,44 @@
+{
+  "credential_source": "aws",
+  "local_secrets_file": "local-secrets.json",
+  "aws_region": "us-west-2",
+  "gitlab_url": "https://gitlab.us.bank-dns.com",
+  "project_path": "BENTO/bento.mobileapp",
+  "branch": "dev",
+  "runner_tag": "bento-mac-pilot",
+  "port": 8765,
+  "public_url": "http://localhost:8765",
+  "ca_bundle": "",
+  "secrets": {
+    "portal": "bento/mac-ci/portal",
+    "gitlab": "bento/mac-ci/gitlab",
+    "runner": "bento/mac-ci/runner",
+    "dependencies": "bento/mac-ci/dependencies",
+    "ios": "bento/mac-ci/ios",
+    "android": "",
+    "artifactory": ""
+  },
+  "artifactory": {"url": "", "repository": "", "prefix": "mobile"},
+  "npm_registries": [
+    "https://artifactory.us.bank-dns.com/artifactory/api/npm/npm-remotes/",
+    "https://artifactory.us.bank-dns.com/artifactory/spend-management-npm-release-local/"
+  ],
+  "toolchain": {
+    "android_sdk": "/Library/Android/sdk",
+    "java_home": "",
+    "developer_dir": "/Applications/Xcode.app/Contents/Developer",
+    "ruby_bin": "",
+    "pod_bin": "",
+    "expected_xcode": "",
+    "expected_pod": "1.16.2"
+  },
+  "ios": {
+    "workspace": "ios/BentoMobileApp.xcworkspace",
+    "scheme": "USBankSpendMgmtMobileApp-Stage",
+    "bundle_id": "com.usbank.SpendManagement.staging",
+    "native_dependencies_url": "https://gitlab.us.bank-dns.com/BENTO/bento.mobileapp.git"
+  },
+  "android": {"task": ":app:assembleSpendmanagementReleaseStaging", "package_id": "com.usbank.spendmanagement"},
+  "minimum_free_gb": 40,
+  "window_minutes": 120
+}

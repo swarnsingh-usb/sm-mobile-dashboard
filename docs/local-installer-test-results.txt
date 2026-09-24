@@ -1,0 +1,6 @@
+PASS: clean extraction, updated source checksums, local guide included, private config excluded
+PASS: nonempty destination refused without overwrite
+PASS: corrupt installer payload rejected before extraction
+PASS: local/no-start flags forwarded to setup (setup stubbed; no tools installed)
+PASS: ZIP contains source only; no credentials, installed tools or runtime data
+No AWS, bank GitLab, Bitrise or signing services contacted. Native builds not run.

@@ -1,0 +1,4 @@
+2
+{'node': 'v20.19.4', 'yarn': '1.22.22', 'runner': 'Version:      19.4.1'}
+Fresh extraction, isolated virtualenv, pinned dependencies, checksum-verified downloads, generated CI configuration: passed.
+Expected native prerequisites blocked on development Mac; no bank integrations were invoked.

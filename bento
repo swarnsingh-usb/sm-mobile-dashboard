@@ -1,0 +1,5 @@
+#!/bin/bash
+set -euo pipefail
+BENTO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$BENTO_ROOT"
+exec "$BENTO_ROOT/.venv/bin/python" -m bento_ci.cli "$@"

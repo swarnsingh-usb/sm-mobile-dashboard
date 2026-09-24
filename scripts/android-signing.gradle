@@ -1,0 +1,12 @@
+allprojects { p ->
+    p.plugins.withId('com.android.application') {
+        p.afterEvaluate {
+            def signing = p.android.signingConfigs.create('bentoPilot')
+            signing.storeFile = new File(System.getenv('BENTO_KEYSTORE'))
+            signing.storePassword = System.getenv('BENTO_STORE_PASSWORD')
+            signing.keyAlias = System.getenv('BENTO_KEY_ALIAS')
+            signing.keyPassword = System.getenv('BENTO_KEY_PASSWORD')
+            p.android.buildTypes.releaseStaging.signingConfig = signing
+        }
+    }
+}
