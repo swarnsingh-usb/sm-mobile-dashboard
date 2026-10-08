@@ -14,7 +14,7 @@ OUTPUT.mkdir(parents=True,exist_ok=True)
 files=[]
 for name in ('bento_ci','static','templates','scripts','tests','docs'):
     files += [p for p in (ROOT/name).rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix!='.pyc']
-files += [ROOT/name for name in ('README.md','setup.sh','bento','config.example.json','requirements.txt','requirements.lock','requirements-dev.txt','.gitignore')]
+files += [ROOT/name for name in ('README.md','COPILOT-WORK-MAC-SETUP.md','setup.sh','bento','config.example.json','requirements.txt','requirements.lock','requirements-dev.txt','.gitignore')]
 files=sorted(set(files))
 manifest={str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
 manifest_bytes=(json.dumps(manifest,indent=2)+'\n').encode()
