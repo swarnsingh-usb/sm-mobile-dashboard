@@ -37,10 +37,10 @@ for BENTO_ARG in "$@"; do
     case "$BENTO_ARG" in github|gitlab) BENTO_NEEDS_SOURCE=0; continue ;; *) echo 'Source must be github or gitlab.' >&2; exit 1 ;; esac
   fi
   case "$BENTO_ARG" in
-    --extract-only|--local|--no-start) ;;
+    --extract-only|--local|--no-start|--work-mac) ;;
     --source) BENTO_NEEDS_SOURCE=1 ;;
     --source=github|--source=gitlab) ;;
-    *) echo 'Usage: bash bento-mac-ci-setup.sh [--extract-only] [--local] [--no-start] [--source github|gitlab]' >&2; exit 1 ;;
+    *) echo 'Usage: bash bento-mac-ci-setup.sh [--extract-only] [--work-mac] [--local] [--no-start] [--source github|gitlab]' >&2; exit 1 ;;
   esac
 done
 if [[ "$BENTO_NEEDS_SOURCE" == 1 ]]; then echo '--source requires github or gitlab.' >&2; exit 1; fi

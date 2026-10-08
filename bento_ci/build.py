@@ -102,7 +102,7 @@ class Commands:
         return ''.join(out)
 
 
-def tool_env(c, root=ROOT):
+def tool_env(c, root=ROOT, native=True):
     env = os.environ.copy()
     # Never inherit Bitrise environment selection, trace mode, or TLS bypasses.
     for key in list(env):
@@ -116,10 +116,12 @@ def tool_env(c, root=ROOT):
         paths.append(t['ruby_bin'])
     paths += ['/opt/homebrew/bin', '/usr/local/bin', env.get('PATH', '/usr/bin:/bin')]
     env.update(PATH=os.pathsep.join(paths), CI='true', AWS_REGION=c['aws_region'],
-        ANDROID_HOME=t['android_sdk'], ANDROID_SDK_ROOT=t['android_sdk'],
-        DEVELOPER_DIR=t['developer_dir'], NODE_OPTIONS='--max-old-space-size=8192',
+        NODE_OPTIONS='--max-old-space-size=8192',
         GIT_TERMINAL_PROMPT='0', npm_config_strict_ssl='true')
-    if t['java_home']:
+    if native:
+        env.update(ANDROID_HOME=t['android_sdk'], ANDROID_SDK_ROOT=t['android_sdk'],
+                   DEVELOPER_DIR=t['developer_dir'])
+    if native and t['java_home']:
         env['JAVA_HOME'] = t['java_home']
     if c['ca_bundle']:
         for key in ('NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE', 'GIT_SSL_CAINFO'):
@@ -134,12 +136,13 @@ def private_file(path, data):
     return path
 
 
-def prepare(c, secret_store, cmd, repo, temp):
-    dependencies = secret_store.get('dependencies', fresh=True)
-    for key in ('npm_token', 'maven_username', 'maven_password'):
+def prepare(c, secret_store, cmd, repo, temp, native=True):
+    fields = ('npm_token', 'maven_username', 'maven_password') if native else ('npm_token',)
+    dependencies = secret_store.get('dependencies', fresh=True, required_fields=fields)
+    for key in fields:
         if not dependencies.get(key) or '\n' in dependencies[key] or '\r' in dependencies[key]:
             raise SafeError(f'Missing or invalid dependency secret field: {key}')
-    cmd.sensitive.update(dependencies[k] for k in ('npm_token', 'maven_username', 'maven_password'))
+    cmd.sensitive.update(dependencies[k] for k in fields)
     npm = ['always-auth=true', 'strict-ssl=true']
     for registry in c['npm_registries']:
         p = urlsplit(registry)
@@ -147,9 +150,10 @@ def prepare(c, secret_store, cmd, repo, temp):
     if c['ca_bundle']:
         npm.append('cafile=' + c['ca_bundle'])
     cmd.env.update(NPM_CONFIG_USERCONFIG=str(private_file(temp / 'npmrc', '\n'.join(npm) + '\n')),
-        ORG_GRADLE_PROJECT_artifactory_username=dependencies['maven_username'],
-        ORG_GRADLE_PROJECT_artifactory_password=dependencies['maven_password'],
         GRADLE_USER_HOME=str(temp / 'gradle'), YARN_CACHE_FOLDER=str(ROOT / 'data/cache/yarn'))
+    if native:
+        cmd.env.update(ORG_GRADLE_PROJECT_artifactory_username=dependencies['maven_username'],
+                       ORG_GRADLE_PROJECT_artifactory_password=dependencies['maven_password'])
     node = cmd.run(['node', '--version'], capture=True).strip()
     yarn = cmd.run(['yarn', '--version'], capture=True).strip()
     if node != 'v20.19.4' or yarn != '1.22.22' or (repo / '.nvmrc').read_text().strip() != '20.19.4':
@@ -417,10 +421,10 @@ def execute_build(c, platform, repo, sha, pipeline, job, source='gitlab', cancel
         if (ROOT / 'data/signing-recovery.json').exists():
             raise SafeError('Signing state needs ./bento recover-signing before another build.')
         temp = Path(tmp)
-        cmd = Commands(tool_env(c), canceled=canceled)
+        cmd = Commands(tool_env(c, native=platform != 'validate'), canceled=canceled)
         cmd.env['PATH'] = str(Path(cmd.env['JAVA_HOME']) / 'bin') + os.pathsep + cmd.env['PATH'] if cmd.env.get('JAVA_HOME') else cmd.env['PATH']
         try:
-            tools = prepare(c, store, cmd, repo, temp)
+            tools = prepare(c, store, cmd, repo, temp, native=platform != 'validate')
             if platform == 'validate':
                 for action in ('typescript', 'lint', 'test'):
                     cmd.run(['yarn', action, *(['--runInBand', '--ci'] if action == 'test' else [])], repo)

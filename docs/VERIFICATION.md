@@ -1,5 +1,17 @@
 # Verification record
 
+## Work Mac validation setup — 2026-10-08
+
+**69 tests passed** after adding `bash setup.sh --work-mac`. The new checks cover fresh setup and reruns using GitLab SSH, saved HTTPS credentials or a privately entered token; validation-only credential/tool requirements; and setup stopping on missing prerequisites. A real temporary Git credential helper verifies that saved HTTPS access is reused. Validation preflight does not inject an unconfigured Xcode path into Git's environment.
+
+Real temporary Git repositories exercise dashboard-launched validation, the pinned commit, persisted success/failure results and logs without AWS, GitLab pipeline APIs or signing credentials. The validation executor is checked through locked dependency preparation, TypeScript, lint and Jest, including stopping on failure. External package installation and code-check subprocesses are simulated in those tests; they do not establish that the bank app passes those checks. Native credential requirements and AWS credential-cache expiry remain checked.
+
+Python compilation, JavaScript/shell syntax, dependency consistency and whitespace checks passed. A scratch installer contained 46 source files with matching checksums and no credentials/runtime files; extraction, `--work-mac` acceptance and the real `setup.sh`/`bento` argument forwarding were checked with a stub Python executable. Real tool downloads were not repeated.
+
+The work Mac, bank GitLab/Artifactory access, actual app validation, native builds and EC2 qualification were not exercised here. Run the steps in [WORK-MAC.md](WORK-MAC.md) on the work Mac to obtain that evidence.
+
+## Earlier EC2 pilot verification
+
 Verified locally 2026-09-24. Bank-host qualification remains pending.
 
 Host clarification: the EC2 Mac is SSH-only with no GUI session. Documentation now uses local/no-start installation and foreground commands for the interactive pilot. The existing GUI LaunchAgent service implementation does not meet the unattended host requirement. No headless startup, reboot recovery, or signed iOS build has been qualified. The GitHub/local-worker update adds a foreground execution path suitable for SSH, but unattended startup and native SSH signing still need target-host qualification.

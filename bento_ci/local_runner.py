@@ -161,7 +161,7 @@ def process_run(runs, row, c):
             runs.save(row)
             with tempfile.TemporaryDirectory(prefix='remote-run-', dir=runs.root / 'runtime') as tmp:
                 temp = Path(tmp)
-                cmd = Commands(tool_env(c, runs.root), canceled=cancellation)
+                cmd = Commands(tool_env(c, runs.root, native=False), canceled=cancellation)
                 checkout = temp / 'source'
                 with job_log(job):
                     source.authenticate(c, Secrets(c), cmd, temp)
@@ -217,6 +217,9 @@ def worker(once=False, workflow=None):
             result = process_run(runs, row, c)
             if result['status'] != 'success':
                 raise SafeError(f'Run {row["id"]} {result["status"]}. See data/local-runs/{row["id"]}/ for logs.')
+            print(f'Run {row["id"]}: success. Logs: data/local-runs/{row["id"]}/', flush=True)
+            if workflow == 'validate-dev':
+                print('Code checks passed. No native binary was built or distributed.', flush=True)
             return
         print('Local worker ready. Keep this SSH session open; Ctrl-C stops it safely.', flush=True)
         while True:

@@ -161,3 +161,30 @@ def test_gitlab_source_uses_same_local_worker_without_pipeline_api(fixture, monk
     local_runner.process_run(runs, row, c)
     assert seen == [('android', sha), ('ios', sha)]
     assert row['status'] == 'success' and row['source_provider'] == 'gitlab'
+
+
+@pytest.mark.parametrize('fail', [False, True])
+def test_work_mac_validation_dashboard_records_result_without_signing_or_native_jobs(fixture, monkeypatch, fail):
+    c, root, _, _, _, sha, _ = fixture
+    c.update(source_provider='gitlab', default_workflow='validate-dev', _config_dir=str(root))
+    c['gitlab'] = dict(transport='ssh', auth='existing', ssh_key='')
+    client = create_app(c, Store(), root=root).test_client()
+    headers = login(client)
+    assert client.get('/api/meta').json['default_workflow'] == 'validate-dev'
+    launched = client.post('/api/builds', json={'workflow': 'validate-dev', 'request_id': 'c' * 36}, headers=headers)
+    assert launched.status_code == 201
+    runs = local_runner.LocalRuns(c, root)
+    row = runs.pipeline(launched.json['id'])
+    def execute(c, platform, repo, commit, *a, **k):
+        assert platform == 'validate' and commit == sha
+        assert (repo / 'tracked.txt').read_text() == 'first commit'
+        print('fixture validation log')
+        if fail: raise SafeError('Fixture lint failed')
+    monkeypatch.setattr(build, 'execute_build', execute)
+    local_runner.process_run(runs, row, c)
+    detail = client.get(f'/api/builds/{row["id"]}').json
+    assert detail['pipeline']['status'] == ('failed' if fail else 'success')
+    assert [j['name'] for j in detail['jobs']] == ['checkout', 'validate']
+    job = detail['jobs'][1]
+    assert b'fixture validation log' in client.get(f'/api/jobs/{job["id"]}/log').data
+    assert job['artifacts_local'] == []

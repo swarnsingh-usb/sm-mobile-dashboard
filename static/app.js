@@ -14,7 +14,7 @@ async function meta() {
   const m = await api('/api/meta'); csrf=m.csrf;
   el('login').hidden=true; el('workspace').hidden=false; el('logout').hidden=false;
   el('project').textContent=`${m.source_provider === 'github' ? 'GitHub' : 'GitLab'} · ${m.project}`; el('storage').textContent=m.storage;
-  if(!el('workflow').options.length) {for(const [key,value] of Object.entries(m.workflows)) {const o=text('option',value); o.value=key; el('workflow').append(o);} el('workflow').value='both-dev';}
+  if(!el('workflow').options.length) {for(const [key,value] of Object.entries(m.workflows)) {const o=text('option',value); o.value=key; el('workflow').append(o);} el('workflow').value=m.default_workflow || 'both-dev';}
   el('window').textContent=m.ready ? 'Pilot window open until ' + new Date(m.window.expires_at*1000).toLocaleTimeString() + '. Keep Bitrise stopped until the new jobs finish.' : m.reason;
   el('window').className='notice'+(m.ready?' ready':''); el('run').disabled=!m.ready;
 }

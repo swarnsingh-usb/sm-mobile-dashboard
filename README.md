@@ -1,5 +1,7 @@
 # Spend Management Mobile Dashboard — EC2 Mac pilot
 
+**Testing on your work Mac first?** Follow [WORK-MAC.md](docs/WORK-MAC.md): clone into a fresh folder, run `bash setup.sh --work-mac`, then `./bento open-window --minutes 240` and `./bento run validate`. This uses bank GitLab and your local Mac worker. Setup collects only the credentials needed for code validation and dashboard login; AWS, native toolchains and signing can wait.
+
 An internal Android/iOS build dashboard for **dev**, AWS **us-west-2 (Oregon)**. Source can be **GitHub `BentoInc/bento.mobileapp`** or **GitLab `BENTO/bento.mobileapp`**. A local Mac worker supports both sources; the original GitLab pipeline integration remains available. It builds Android and iOS on the existing EC2 Mac and keeps outputs on its disk. Artifactory is optional until the repository is known.
 
 **Host constraint: SSH/command line only; no GUI session.** Use the direct-build path below for the first test. View the web dashboard in your laptop's browser through an SSH tunnel. The current `services` implementation uses GUI LaunchAgents and does not meet this host's unattended-service requirement; do not use it on this host. Headless startup/reboot recovery and actual iOS signing still need qualification.

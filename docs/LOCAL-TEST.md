@@ -1,5 +1,7 @@
 # First build over SSH, without AWS Secrets Manager
 
+**Using your own work Mac?** Start with [WORK-MAC.md](WORK-MAC.md) for a fresh clone, one setup script and code validation without native signing. The SSH instructions below apply to the remote Mac pilot.
+
 **GitLab DNS blocked?** Follow [GITHUB.md](GITHUB.md) first. It provides GitHub source selection, remote `dev` builds with `./bento run both`, and a dashboard/worker that do not contact GitLab. The separate-checkout path below remains supported for either selected provider.
 
 This path runs Android and iOS builds directly from the Mac terminal. It needs no AWS secrets, EC2 role, GitLab runner registration, pipeline commit, or dashboard login. It still needs access to the private dependency repositories and the existing iOS signing certificate/private key and provisioning profiles. Use the approved credentials you already have; this package does not extract them from Bitrise.

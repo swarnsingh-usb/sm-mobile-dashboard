@@ -1,5 +1,7 @@
 # Mac setup and prerequisites
 
+For work-Mac code validation, use [WORK-MAC.md](WORK-MAC.md) and `bash setup.sh --work-mac`. That path checks only validation prerequisites. Later, `./bento native-tools` collects the existing native tool paths for actual APK/IPA builds.
+
 For the first SSH build without AWS or GitLab runner setup, follow [LOCAL-TEST.md](LOCAL-TEST.md). The role, Secrets Manager connectivity and service setup below apply to the later AWS-backed dashboard/runner path.
 
 The actual host has no GUI session. Always use `--no-start` during installation; the existing GUI LaunchAgent service installer does not meet this host's requirements. The service/reboot notes below describe that implementation's limitation, not an instruction to enable a desktop. Use foreground commands only for the interactive pilot; unattended headless service deployment is not yet ready.

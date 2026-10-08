@@ -27,7 +27,7 @@ def ask(label, default=''):
     return answer or default
 
 
-def configure(local=False, source=None):
+def configure(local=False, source=None, work_mac=False):
     path = ROOT / 'config.json'
     if path.exists():
         if local or source:
@@ -39,6 +39,8 @@ def configure(local=False, source=None):
                 sources.defaults(c)
                 c['source_provider'] = source
                 c['build_backend'] = 'local'
+            if work_mac:
+                c['default_workflow'] = 'validate-dev'
             atomic_json(path, c)
         print('Existing tool paths and GitLab settings preserved.' + (f' Source selected: {source}.' if source else ''))
         if local:
@@ -48,37 +50,41 @@ def configure(local=False, source=None):
     if not sys.stdin.isatty():
         raise SafeError('Copy config.example.json to config.json and edit it, or run setup interactively.')
     c['credential_source'] = 'local' if local else 'aws'
+    if work_mac:
+        c['gitlab'] = {'transport': 'ssh', 'auth': 'existing', 'ssh_key': ''}
+        c['default_workflow'] = 'validate-dev'
     sources.defaults(c)
     if source:
         c['source_provider'] = source
         c['build_backend'] = 'local'
-    print('Local credential mode: run ./bento credentials after setup.' if local else
-          'Configuration contains secret references only. Put secret values in AWS Secrets Manager, not here.')
-    c['aws_region'] = ask('AWS region', c['aws_region'])
+    if work_mac:
+        print('Work Mac setup: GitLab source, local credentials and code validation. Native builds can be configured later.')
+    else:
+        print('Local credential mode: run ./bento credentials after setup.' if local else
+              'Configuration contains secret references only. Put secret values in AWS Secrets Manager, not here.')
+    if not local:
+        c['aws_region'] = ask('AWS region', c['aws_region'])
     if sources.provider(c) == 'gitlab':
         c['gitlab_url'] = ask('GitLab base URL', c['gitlab_url'])
         c['project_path'] = ask('GitLab project path', c['project_path'])
+        if work_mac:
+            access = ask('GitLab access: ssh, https (saved Git credentials), or token', 'ssh').lower()
+            if access not in ('ssh', 'https', 'token'):
+                raise SafeError('Choose ssh, https, or token; rerun setup.')
+            c['gitlab']['transport'] = 'ssh' if access == 'ssh' else 'https'
+            c['gitlab']['auth'] = 'token' if access == 'token' else 'existing'
+            if access == 'ssh':
+                c['gitlab']['ssh_key'] = ask('GitLab SSH key path (empty uses your existing SSH configuration/agent)')
     else:
         c['github']['repository'] = ask('GitHub app repository', c['github']['repository'])
         c['github']['ssh_key'] = ask('GitHub SSH private key path (empty uses your SSH configuration)')
     c['ca_bundle'] = ask('Full PEM CA bundle path, if required by the bank')
-    c['toolchain']['android_sdk'] = ask('Existing Android SDK directory', os.environ.get('ANDROID_HOME', c['toolchain']['android_sdk']))
-    try:
-        java = subprocess.check_output(['/usr/libexec/java_home', '-v', '17'], stderr=subprocess.DEVNULL, text=True).strip()
-    except subprocess.CalledProcessError:
-        java = ''
-    c['toolchain']['java_home'] = ask('Existing JDK 17 home', java)
-    c['toolchain']['developer_dir'] = ask('Existing Xcode Developer directory', c['toolchain']['developer_dir'])
-    try:
-        version = subprocess.check_output(['xcodebuild', '-version'], env={**os.environ, 'DEVELOPER_DIR': c['toolchain']['developer_dir']}, text=True, stderr=subprocess.DEVNULL).splitlines()[0].removeprefix('Xcode ')
-    except Exception:
-        version = ''
-    c['toolchain']['expected_xcode'] = ask('Qualified existing Xcode version', version)
-    pod = shutil.which('pod') or ''
-    c['toolchain']['pod_bin'] = ask('Existing qualified CocoaPods executable', pod)
-    c['toolchain']['ruby_bin'] = ask('Directory containing qualified Ruby (optional)', '')
-    c['toolchain']['expected_pod'] = ask('Qualified CocoaPods version', c['toolchain']['expected_pod'])
-    c['ios']['native_dependencies_url'] = c['gitlab_url'] + '/' + c['project_path'] + '.git'
+    c['ios']['native_dependencies_url'] = c['gitlab_url'].rstrip('/') + '/' + c['project_path'] + '.git'
+    if work_mac:
+        # Validation needs no native toolchain or signing configuration.
+        atomic_json(path, c)
+        return load_config()
+    configure_native_tools(c)
     if not local:
         names = ['portal', 'dependencies', 'ios']
         if sources.credential_name(c): names.append(sources.credential_name(c))
@@ -94,7 +100,30 @@ def configure(local=False, source=None):
     return load_config()
 
 
-def select_source(name, backend=None, ssh_key=None, transport=None):
+def configure_native_tools(c):
+    """Collect existing native paths, including after a validation-only installation."""
+    sdk = os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+    if not sdk and (Path.home() / 'Library/Android/sdk').is_dir():
+        sdk = str(Path.home() / 'Library/Android/sdk')
+    c['toolchain']['android_sdk'] = ask('Existing Android SDK directory', sdk or c['toolchain']['android_sdk'])
+    try:
+        java = subprocess.check_output(['/usr/libexec/java_home', '-v', '17'], stderr=subprocess.DEVNULL, text=True).strip()
+    except (OSError, subprocess.CalledProcessError):
+        java = ''
+    c['toolchain']['java_home'] = ask('Existing JDK 17 home', java)
+    c['toolchain']['developer_dir'] = ask('Existing Xcode Developer directory', c['toolchain']['developer_dir'])
+    try:
+        version = subprocess.check_output(['xcodebuild', '-version'], env={**os.environ, 'DEVELOPER_DIR': c['toolchain']['developer_dir']}, text=True, stderr=subprocess.DEVNULL).splitlines()[0].removeprefix('Xcode ')
+    except Exception:
+        version = ''
+    c['toolchain']['expected_xcode'] = ask('Qualified existing Xcode version', version)
+    pod = shutil.which('pod') or ''
+    c['toolchain']['pod_bin'] = ask('Existing qualified CocoaPods executable', pod)
+    c['toolchain']['ruby_bin'] = ask('Directory containing qualified Ruby (optional)', '')
+    c['toolchain']['expected_pod'] = ask('Qualified CocoaPods version', c['toolchain']['expected_pod'])
+
+
+def select_source(name, backend=None, ssh_key=None, transport=None, auth=None):
     if name not in ('github', 'gitlab'):
         raise SafeError('Choose ./bento source github or ./bento source gitlab.')
     path = ROOT / 'config.json'
@@ -102,18 +131,22 @@ def select_source(name, backend=None, ssh_key=None, transport=None):
     c.pop('_config_dir', None)
     c['source_provider'] = name
     c['build_backend'] = backend or ('local' if name == 'github' else c['build_backend'])
-    if ssh_key is not None: c['github']['ssh_key'] = str(Path(ssh_key).expanduser()) if ssh_key else ''
-    if transport is not None: c['github']['transport'] = transport
+    if ssh_key is not None: c[name]['ssh_key'] = str(Path(ssh_key).expanduser()) if ssh_key else ''
+    if transport is not None: c[name]['transport'] = transport
+    if auth is not None:
+        if name != 'gitlab':
+            raise SafeError('--auth applies to GitLab only.')
+        c['gitlab']['auth'] = auth
     sources.validate(c)
     atomic_json(path, c)
     print(f'Source: {sources.clone_url(c)}; build backend: {c["build_backend"]}.')
     print('GitLab settings and all credentials retained. Restart the idle dashboard/worker to apply this choice.')
 
 
-def check_source(c):
+def check_source(c, validation=False):
     from .build import Commands, tool_env
     with tempfile.TemporaryDirectory(dir=ROOT / 'runtime') as tmp:
-        sources.check_remote(c, Secrets(c), Commands(tool_env(c), monitor_bitrise=False), Path(tmp))
+        sources.check_remote(c, Secrets(c), Commands(tool_env(c, native=False), monitor_bitrise=False), Path(tmp), native=not validation)
 
 
 def portal_credentials(c):
@@ -136,11 +169,11 @@ def portal_credentials(c):
     print('Dashboard login saved privately. Restart the dashboard if it is running.')
 
 
-def credentials(c):
+def credentials(c, validation=False):
     if c.get('credential_source') != 'local':
         raise SafeError('First select local mode with ./bento configure --local.')
     if not sys.stdin.isatty():
-        raise SafeError('Run ./bento credentials in an interactive SSH terminal.')
+        raise SafeError('Run ./bento credentials in an interactive terminal.')
     store = Secrets(c)
     path = store.local_path()
     if path.exists():
@@ -151,13 +184,21 @@ def credentials(c):
     else:
         values = {}
     print('Credentials stay in a private local JSON file. Hidden prompts accept Enter to keep an existing value.')
-    sections = [('dependencies', ('npm_token', 'maven_username', 'maven_password'))]
+    fields = ('npm_token',) if validation else ('npm_token', 'maven_username', 'maven_password')
+    sections = [('dependencies', fields)]
     source_credential = sources.credential_name(c)
     if source_credential: sections.append((source_credential, ('token',)))
     for name, fields in sections:
         value = values.setdefault(name, {})
         for field in fields:
             value[field] = getpass.getpass(f'{name}.{field}: ') or value.get(field, '')
+    if validation:
+        atomic_json(path, values)
+        store.get('dependencies', fresh=True, required_fields=('npm_token',))
+        if source_credential:
+            store.get(source_credential, fresh=True)
+        print('Validation credentials saved privately. Native signing can be configured later.')
+        return
     ios = values.setdefault('ios', {})
     ios['p12_file'] = ask('Signing certificate/private key .p12 path', ios.get('p12_file', ''))
     ios['p12_password'] = getpass.getpass('P12 password: ') or ios.get('p12_password', '')
@@ -353,21 +394,23 @@ def service(action):
     print('Only this installation’s Bento services were affected. Bitrise was not changed.')
 
 
-def doctor(c, online=False, build_only=False):
+def doctor(c, online=False, build_only=False, validation=False):
     from .build import tool_env
     failures = []
-    env = tool_env(c)
+    env = tool_env(c, native=not validation)
     if env.get('JAVA_HOME'):
         env['PATH'] = str(Path(env['JAVA_HOME']) / 'bin') + os.pathsep + env['PATH']
-    checks = [('Node', ['node', '--version']), ('Yarn', ['yarn', '--version']), ('Java', ['java', '-version']),
-        ('Xcode', ['xcodebuild', '-version']), ('Ruby', ['ruby', '--version']),
-        ('CocoaPods', [c['toolchain']['pod_bin'] or 'pod', '--version'])]
+    checks = [('Git', ['git', '--version']), ('Node', ['node', '--version']), ('Yarn', ['yarn', '--version'])]
+    if not validation:
+        checks += [('Java', ['java', '-version']),
+                   ('Xcode', ['xcodebuild', '-version']), ('Ruby', ['ruby', '--version']),
+                   ('CocoaPods', [c['toolchain']['pod_bin'] or 'pod', '--version'])]
     for name, command in checks:
         try:
             r = subprocess.run(command, env=env, capture_output=True, text=True, timeout=45)
             text = (r.stdout or r.stderr).strip().splitlines()
             print(f'{name}: ' + (text[0] if text else 'no output'))
-            if r.returncode:
+            if r.returncode or not text:
                 failures.append(name)
             elif name == 'Node' and text[0] != 'v20.19.4': failures.append('Node version')
             elif name == 'Yarn' and text[0] != '1.22.22': failures.append('Yarn version')
@@ -380,7 +423,8 @@ def doctor(c, online=False, build_only=False):
         except (OSError, subprocess.TimeoutExpired):
             failures.append(name)
             print(f'{name}: missing or timed out')
-    for part in ('platforms/android-36/android.jar', 'build-tools/36.0.0/aapt', 'ndk/27.0.12077973/source.properties'):
+    sdk_parts = () if validation else ('platforms/android-36/android.jar', 'build-tools/36.0.0/aapt', 'ndk/27.0.12077973/source.properties')
+    for part in sdk_parts:
         ok = (Path(c['toolchain']['android_sdk']) / part).exists()
         print(f'Android {part}: ' + ('present' if ok else 'MISSING'))
         if not ok:
@@ -394,20 +438,20 @@ def doctor(c, online=False, build_only=False):
         failures.append('signing recovery')
     if online:
         store = Secrets(c)
-        names = ['dependencies', 'ios']
+        names = ['dependencies'] if validation else ['dependencies', 'ios']
         if sources.credential_name(c): names.append(sources.credential_name(c))
         if not build_only: names.append('portal')
         if not build_only and c.get('build_backend', 'gitlab') == 'gitlab': names.append('runner')
         for name in names:
             try:
-                store.get(name, fresh=True)
+                store.get(name, fresh=True, **({'required_fields': ('npm_token',)} if validation and name == 'dependencies' else {}))
                 print(f'Secret {name}: readable (values withheld)')
             except SafeError:
                 failures.append('secret ' + name)
                 print(f'Secret {name}: unavailable')
         try:
             if c.get('build_backend', 'gitlab') == 'local' or build_only:
-                check_source(c)
+                check_source(c, validation=validation)
             else:
                 gl = GitLab(c, store)
                 b = gl.project_call('GET', '/repository/branches/dev')
@@ -420,8 +464,28 @@ def doctor(c, online=False, build_only=False):
             failures.append('source access/dependency branch')
             print(str(e))
     print('Artifactory: ' + ('configured; actual write/checksum verified during build' if c['artifactory']['url'] else 'disabled; artifacts retained on Mac disk'))
-    print('Preflight result: ' + ('BLOCKED: ' + ', '.join(failures) if failures else 'Local checks passed; native builds still require live qualification.'))
+    passed = 'Validation prerequisites passed; run Code checks to verify dependency installation and the app.' if validation else 'Local checks passed; native builds still require live qualification.'
+    print('Preflight result: ' + ('BLOCKED: ' + ', '.join(failures) if failures else passed))
     return bool(failures)
+
+
+def setup_work_mac():
+    c = configure(local=True, source='gitlab', work_mac=True)
+    install_tools()
+    if doctor(c, validation=True):
+        print('Setup paused. Resolve the listed prerequisites, then rerun bash setup.sh --work-mac.')
+        return 2
+    credentials(c, validation=True)
+    portal_credentials(c)
+    if doctor(c, online=True, validation=True):
+        print('Setup paused. Fix GitLab access or credentials, then rerun bash setup.sh --work-mac.')
+        return 2
+    print('Work Mac setup complete. GitLab source, local worker, local credentials.')
+    print('First validation: ./bento open-window --minutes 240 && ./bento run validate')
+    print('Dashboard: ./bento serve, then open ' + c['public_url'])
+    print('To launch from the dashboard, keep ./bento worker running in another terminal.')
+    print('Choose Code checks · dev. Validation does not produce an APK/IPA or distribute the app.')
+    return 0
 
 
 def recover():
@@ -445,24 +509,31 @@ def recover():
 def main():
     os.umask(0o077)
     p = argparse.ArgumentParser(description='Bento Mac CI')
-    p.add_argument('command', choices=['setup','configure','source','check-source','portal-credentials','run','worker','credentials','test-build','tools','generate','register','services','doctor','serve','runner','build','open-window','close-window','recover-signing','install-pipeline'])
+    p.add_argument('command', choices=['setup','configure','native-tools','source','check-source','portal-credentials','run','worker','credentials','test-build','tools','generate','register','services','doctor','serve','runner','build','open-window','close-window','recover-signing','install-pipeline'])
     p.add_argument('argument', nargs='?')
     p.add_argument('--online', action='store_true')
     p.add_argument('--no-start', action='store_true')
     p.add_argument('--local', action='store_true', help='Read credentials locally instead of AWS; setup leaves services stopped')
     p.add_argument('--source', choices=['github', 'gitlab'])
+    p.add_argument('--work-mac', action='store_true', help='Set up GitLab + local dashboard for validation, without AWS or native signing')
+    p.add_argument('--validation', action='store_true', help='Check/collect only code-validation prerequisites, without native tools or signing')
     p.add_argument('--backend', choices=['local', 'gitlab'])
     p.add_argument('--transport', choices=['ssh', 'https'])
-    p.add_argument('--ssh-key', help='Optional GitHub private key path; never the key contents')
+    p.add_argument('--ssh-key', help='Optional source private key path; never the key contents')
+    p.add_argument('--auth', choices=['existing', 'token'], help='GitLab HTTPS: reuse saved Git credentials or use a dashboard-managed token')
     p.add_argument('--once', action='store_true', help='Worker drains current pending runs and exits')
     p.add_argument('--repo', help='Separate configured app checkout containing the local dev branch')
     p.add_argument('--build-only', action='store_true', help='Skip portal/runner credential and protected-branch checks in doctor')
     p.add_argument('--minutes', type=int, default=120)
     args = p.parse_args()
+    if args.work_mac and (args.command != 'setup' or args.source == 'github' or args.backend == 'gitlab'):
+        p.error('--work-mac is for setup with GitLab source and the local backend.')
     for name in ('data', 'runtime', 'generated', 'data/runner'):
         (ROOT / name).mkdir(parents=True, exist_ok=True)
     try:
         if args.command == 'setup':
+            if args.work_mac:
+                return setup_work_mac()
             c = configure(local=args.local, **({'source': args.source} if args.source else {}))
             install_tools()
             generate(c)
@@ -483,14 +554,22 @@ def main():
                 print('Native build prerequisites are missing; resolve the items above and run ./bento doctor.')
                 return 2
         elif args.command == 'configure': configure(local=args.local, source=args.source)
-        elif args.command == 'source': select_source(args.argument, args.backend, args.ssh_key, args.transport)
-        elif args.command == 'check-source': check_source(load_config())
+        elif args.command == 'native-tools':
+            if not sys.stdin.isatty():
+                raise SafeError('Run ./bento native-tools in an interactive terminal.')
+            c = load_config()
+            configure_native_tools(c)
+            c.pop('_config_dir', None)
+            atomic_json(ROOT / 'config.json', c)
+            print('Native tool paths saved. Run ./bento credentials, then ./bento doctor --online --build-only.')
+        elif args.command == 'source': select_source(args.argument, args.backend, args.ssh_key, args.transport, args.auth)
+        elif args.command == 'check-source': check_source(load_config(), validation=args.validation)
         elif args.command == 'portal-credentials': portal_credentials(load_config())
         elif args.command in ('run', 'worker'):
             from .local_runner import worker
             workflow = (args.argument or 'both').removesuffix('-dev') + '-dev' if args.command == 'run' else None
             worker(once=args.once, workflow=workflow)
-        elif args.command == 'credentials': credentials(load_config())
+        elif args.command == 'credentials': credentials(load_config(), validation=args.validation)
         elif args.command == 'test-build':
             from .build import local_build
             local_build(args.argument or 'both', args.repo)
@@ -498,7 +577,7 @@ def main():
         elif args.command == 'generate': generate(load_config())
         elif args.command == 'register': register(load_config())
         elif args.command == 'services': service(args.argument or 'status')
-        elif args.command == 'doctor': return 2 if doctor(load_config(), args.online, args.build_only) else 0
+        elif args.command == 'doctor': return 2 if doctor(load_config(), args.online, args.build_only, args.validation) else 0
         elif args.command == 'serve':
             from .server import serve
             serve()

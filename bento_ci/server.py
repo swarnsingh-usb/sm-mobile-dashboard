@@ -123,6 +123,7 @@ def create_app(config=None, secret_store=None, gitlab=None, root=ROOT):
             window, ready, reason = {}, False, str(e)
         return jsonify(project=sources.repository(c), source_provider=sources.provider(c),
             backend=c.get('build_backend', 'gitlab'), branch='dev', workflows=WORKFLOWS,
+            default_workflow=c.get('default_workflow', 'both-dev'),
             csrf=session['csrf'], storage='Artifactory + Mac' if c['artifactory']['url'] else 'Mac disk',
             window=window, ready=ready, reason=reason)
 

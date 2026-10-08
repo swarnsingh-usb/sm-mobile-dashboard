@@ -4,7 +4,7 @@ umask 077
 BENTO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$BENTO_ROOT"
 if [[ "$(uname -s)" != Darwin ]]; then
-  echo 'Run this installer on the EC2 Mac. See README.md for local tests.' >&2; exit 1
+  echo 'Run this installer on macOS (a work Mac or EC2 Mac).' >&2; exit 1
 fi
 if [[ "$EUID" == 0 ]]; then
   echo 'Run as the dedicated macOS build user, not root.' >&2; exit 1

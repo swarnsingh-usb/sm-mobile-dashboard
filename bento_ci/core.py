@@ -136,16 +136,18 @@ class Secrets:
             value['keystore_base64'] = encode_asset(value['keystore_file'])
         return value
 
-    def get(self, name, fresh=False):
+    def get(self, name, fresh=False, *, required_fields=None):
         ref = self.c['secrets'].get(name)
         if not ref and self.source == 'aws':
             raise SafeError(f'Secrets Manager reference is not configured: {name}')
         with self.lock:
             old = self.cache.get(name)
-            if self.source == 'aws' and old and not fresh and time.monotonic() - old[0] < 300:
-                return old[1]
+            cached = self.source == 'aws' and old and not fresh and time.monotonic() - old[0] < 300
             try:
-                value = self.local_value(name) if self.source == 'local' else json.loads(self.client.get_secret_value(SecretId=ref)['SecretString'])
+                if cached:
+                    value = old[1]
+                else:
+                    value = self.local_value(name) if self.source == 'local' else json.loads(self.client.get_secret_value(SecretId=ref)['SecretString'])
                 if not isinstance(value, dict):
                     raise ValueError()
                 required = {
@@ -156,6 +158,8 @@ class Secrets:
                     'android': ('keystore_base64', 'store_password', 'key_alias', 'key_password'),
                     'artifactory': ('token',),
                 }.get(name, ())
+                if required_fields is not None:
+                    required = required_fields
                 if any(not isinstance(value.get(k), str) or not value[k] for k in required):
                     raise ValueError()
                 if name == 'ios' and (not isinstance(value.get('profiles_base64'), list) or not value['profiles_base64'] or not isinstance(value.get('export_options'), dict)):
@@ -164,7 +168,7 @@ class Secrets:
                 if self.source == 'local':
                     raise SafeError(f'Cannot read local credential {name}. Run ./bento credentials; check the JSON, asset paths, ownership and chmod 600 on local-secrets.json.') from None
                 raise SafeError(f'Cannot read JSON secret {name}. Check the instance role, region, network, and secret schema.') from None
-            self.cache[name] = (time.monotonic(), value)
+            self.cache[name] = (old[0] if cached else time.monotonic(), value)
             return value
 
 
