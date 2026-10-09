@@ -16,10 +16,21 @@ from botocore.config import Config as AWSConfig
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = {
-    'both-dev': 'Android + iOS · dev',
-    'android-dev': 'Android · dev',
-    'ios-dev': 'iOS · dev',
+    'both-dev': 'Android + iOS Stage',
+    'android-stage': 'Android · Stage',
+    'android-developer': 'Android · Developer',
+    'ios-dev': 'iOS · Stage',
+    'ios-developer': 'iOS · Developer',
     'validate-dev': 'Code checks · dev',
+}
+
+WORKFLOW_TARGETS = {
+    'both-dev': [('android', 'stage'), ('ios', None)],
+    'android-stage': [('android', 'stage')],
+    'android-developer': [('android', 'developer')],
+    'ios-dev': [('ios', None)],
+    'ios-developer': [('ios', 'developer')],
+    'validate-dev': [('validate', None)],
 }
 
 
@@ -51,6 +62,9 @@ def load_config(path=None):
         raise SafeError('Invalid runner tag.')
     for url in c['npm_registries']:
         https_url(url)
+    c['maven_repository'] = https_url(c['maven_repository'])
+    if urlsplit(c['maven_repository']).hostname != urlsplit(c['npm_registries'][0]).hostname:
+        raise SafeError('Maven and npm dependency repositories must use the same approved host.')
     https_url(c['ios']['native_dependencies_url'])
     from .source import validate
     validate(c)

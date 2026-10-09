@@ -37,7 +37,9 @@ def create_app(config=None, secret_store=None, gitlab=None, root=ROOT):
     rate_lock = threading.Lock()
     dbpath = root / 'data/requests.sqlite3'
     with sqlite3.connect(dbpath) as db:
-        db.execute('CREATE TABLE IF NOT EXISTS launches (request_id TEXT PRIMARY KEY, workflow TEXT, result TEXT)')
+        db.execute("CREATE TABLE IF NOT EXISTS launches (request_id TEXT PRIMARY KEY, workflow TEXT, result TEXT, branch TEXT NOT NULL DEFAULT 'dev')")
+        if 'branch' not in [row[1] for row in db.execute('PRAGMA table_info(launches)')]:
+            db.execute("ALTER TABLE launches ADD COLUMN branch TEXT NOT NULL DEFAULT 'dev'")
     dbpath.chmod(0o600)
 
     def authenticated(fn):
@@ -122,10 +124,15 @@ def create_app(config=None, secret_store=None, gitlab=None, root=ROOT):
         except SafeError as e:
             window, ready, reason = {}, False, str(e)
         return jsonify(project=sources.repository(c), source_provider=sources.provider(c),
-            backend=c.get('build_backend', 'gitlab'), branch='dev', workflows=WORKFLOWS,
+            backend=c.get('build_backend', 'gitlab'), branch=c.get('branch', 'dev'), workflows=WORKFLOWS,
             default_workflow=c.get('default_workflow', 'both-dev'),
             csrf=session['csrf'], storage='Artifactory + Mac' if c['artifactory']['url'] else 'Mac disk',
             window=window, ready=ready, reason=reason)
+
+    @app.get('/api/branches')
+    @authenticated
+    def branches():
+        return jsonify(local.branches() if local else ['dev'])
 
     @app.get('/api/builds')
     @authenticated
@@ -143,19 +150,23 @@ def create_app(config=None, secret_store=None, gitlab=None, root=ROOT):
         data = request.get_json() or {}
         key = data.get('request_id', '')
         workflow = data.get('workflow')
+        branch = sources.validate_branch(data.get('branch', c.get('branch', 'dev')))
         if workflow not in WORKFLOWS or not re.fullmatch(r'[a-f0-9-]{36}', key):
             raise SafeError('Choose a supported workflow and supply a valid request ID.')
+        if not local and branch != 'dev':
+            raise SafeError('Hosted launches are restricted to the dev branch.')
         with sqlite3.connect(dbpath) as db:
             try:
-                db.execute('INSERT INTO launches VALUES (?, ?, NULL)', (key, workflow))
+                db.execute('INSERT INTO launches (request_id, workflow, result, branch) VALUES (?, ?, NULL, ?)',
+                           (key, workflow, branch))
             except sqlite3.IntegrityError:
-                old = db.execute('SELECT workflow,result FROM launches WHERE request_id=?', (key,)).fetchone()
-                if old[0] != workflow:
-                    raise SafeError('Request ID was already used for a different workflow.')
+                old = db.execute('SELECT workflow,result,branch FROM launches WHERE request_id=?', (key,)).fetchone()
+                if old[0] != workflow or old[2] != branch:
+                    raise SafeError('Request ID was already used for a different workflow or branch.')
                 if old[1]:
                     return jsonify(json.loads(old[1]))
                 return jsonify(error='This launch is pending or its result is unknown. Check build history before launching another.'), 409
-        result = (local or gl).launch(workflow, key)
+        result = local.launch(workflow, key, branch) if local else gl.launch(workflow, key)
         with sqlite3.connect(dbpath) as db:
             db.execute('UPDATE launches SET result=? WHERE request_id=?', (json.dumps(result), key))
         return jsonify(result), 201

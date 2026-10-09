@@ -77,6 +77,14 @@ Secrets Manager values have a 65,536-byte limit. Check the size of the finished 
 
 Set `secrets.android` to its name. Without it, the existing `releaseStaging` debug signing configuration is preserved and the manifest says `repository-debug-key`. The application ID remains `com.usbank.spendmanagement`, which is also used by production; this is not a side-by-side install design. Do not generate or substitute a production signing key.
 
+## Android Stage certificate pins
+
+```json
+{"ssl_certificate":"REPLACE_WITH_STAGE_PIN","ssl_certificate_backup":"REPLACE_WITH_BACKUP_STAGE_PIN"}
+```
+
+Store this as the secret referenced by `secrets.android_environment`. Both the Stage and Developer Android workflows require it because their current Bitrise workflows enable SSL pinning and root detection. In local mode, run `./bento android-environment-credentials`; the hidden prompts update the private local credential file without putting values in shell history or logs.
+
 ## Optional Artifactory upload secret
 
 ```json

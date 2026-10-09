@@ -15,7 +15,9 @@ h3{font-size:14px}
 .pill{background:#e6edff;color:#0c2074;padding:10px 15px;border-radius:30px;font-size:12px;font-weight:600}
 .launch{display:flex;align-items:center;justify-content:space-between;margin:20px 0}
 .launch p{margin-bottom:0}
-.launch form{display:flex;gap:12px}
+.launch form{display:flex;align-items:flex-end;gap:12px}
+.control-label{margin:0;color:#56657b;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase}
+.control-label select{display:block;min-width:180px;margin-top:6px;text-transform:none;letter-spacing:0}
 button,select,input{font:inherit;border:1px solid #bcc9dd;border-radius:7px;padding:11px 14px;background:white;color:#0c2074}
 button{cursor:pointer;font-size:13px;font-weight:600}
 button:hover{background:#eef6ff}

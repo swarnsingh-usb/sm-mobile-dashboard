@@ -94,6 +94,67 @@ def test_dashboard_launch_worker_logs_artifacts_and_pinned_commit(fixture, monke
     assert fresh.get('/api/builds').json[0]['status'] == 'success'
 
 
+def test_local_runner_discovers_and_builds_selected_branch(fixture, monkeypatch):
+    c, root, client, headers, runs, _, git = fixture
+    git('switch', '-c', 'feature/test-branch')
+    (root / 'remote/tracked.txt').write_text('feature branch')
+    git('commit', '-am', 'feature branch')
+    feature_sha = git('rev-parse', 'HEAD')
+    git('switch', 'dev')
+
+    assert runs.branches() == ['dev', 'feature/test-branch']
+    assert client.get('/api/branches').json == ['dev', 'feature/test-branch']
+    launched = client.post('/api/builds', json={'workflow': 'validate-dev', 'branch': 'feature/test-branch',
+        'request_id': 'd' * 36}, headers=headers)
+    assert launched.status_code == 201
+    row = runs.pipeline(launched.json['id'])
+    assert row['ref'] == 'feature/test-branch'
+
+    def execute(config, platform, repo, commit, *args, **kwargs):
+        assert platform == 'validate'
+        assert commit == feature_sha
+        assert kwargs['branch'] == 'feature/test-branch'
+        assert (repo / 'tracked.txt').read_text() == 'feature branch'
+
+    monkeypatch.setattr(build, 'execute_build', execute)
+    local_runner.process_run(runs, row, c)
+    assert row['status'] == 'success'
+    assert row['sha'] == feature_sha
+    with pytest.raises(SafeError, match='valid source branch'):
+        runs.launch('validate-dev', 'terminal', '../invalid')
+    with pytest.raises(SafeError, match='does not exist'):
+        runs.launch('validate-dev', 'terminal', 'missing-branch')
+
+
+def test_developer_ios_workflow_selects_developer_variant(fixture, monkeypatch):
+    c, _, _, _, runs, _, _ = fixture
+    row = runs.launch('ios-developer', 'terminal')
+    assert row['jobs'][1]['name'] == 'ios-developer'
+    assert row['jobs'][1]['platform'] == 'ios'
+    assert row['jobs'][1]['variant'] == 'developer'
+    seen = []
+    monkeypatch.setattr(build, 'execute_build', lambda *args, **kwargs: seen.append((args[1], kwargs['ios_variant'])))
+    local_runner.process_run(runs, row, c)
+    assert seen == [('ios', 'developer')]
+
+
+@pytest.mark.parametrize(('workflow', 'variant'), [
+    ('android-stage', 'stage'),
+    ('android-developer', 'developer'),
+])
+def test_android_workflow_selects_variant(fixture, monkeypatch, workflow, variant):
+    c, _, _, _, runs, _, _ = fixture
+    row = runs.launch(workflow, 'terminal')
+    assert row['jobs'][1]['name'] == f'android-{variant}'
+    assert row['jobs'][1]['platform'] == 'android'
+    assert row['jobs'][1]['variant'] == variant
+    seen = []
+    monkeypatch.setattr(build, 'execute_build',
+        lambda *args, **kwargs: seen.append((args[1], kwargs['android_variant'])))
+    local_runner.process_run(runs, row, c)
+    assert seen == [('android', variant)]
+
+
 @pytest.mark.parametrize('condition', ['failure', 'cancel', 'expiry'])
 def test_failed_canceled_or_expired_run_never_starts_second_platform(fixture, monkeypatch, condition):
     c, root, client, headers, runs, _, _ = fixture
@@ -126,6 +187,12 @@ def test_queued_cancel_source_change_and_closed_window(fixture, monkeypatch):
     changed['source_provider'] = 'gitlab'
     local_runner.process_run(runs, row, changed)
     assert row['status'] == 'failed' and 'Source configuration changed' in row['error']
+    foreign = copy.deepcopy(row)
+    foreign.update(id=row['id'] + 1, project='another/project')
+    foreign_folder = runs.folder(foreign['id'])
+    foreign_folder.mkdir()
+    atomic_json(foreign_folder / 'run.json', foreign)
+    assert all(item['project'] == c['project_path'] for item in runs.builds())
     (root / 'data/pilot-window.json').unlink()
     assert client.post('/api/builds', json={'workflow': 'both-dev', 'request_id': 'b' * 36}, headers=headers).status_code == 400
 

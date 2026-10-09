@@ -23,6 +23,7 @@
     "dependencies": "bento/mac-ci/dependencies",
     "ios": "bento/mac-ci/ios",
     "android": "",
+    "android_environment": "bento/mac-ci/android-environment",
     "artifactory": ""
   },
   "artifactory": {"url": "", "repository": "", "prefix": "mobile"},
@@ -30,6 +31,7 @@
     "https://artifactory.us.bank-dns.com/artifactory/api/npm/npm-remotes/",
     "https://artifactory.us.bank-dns.com/artifactory/spend-management-npm-release-local/"
   ],
+  "maven_repository": "https://artifactory.us.bank-dns.com/artifactory/android-maven-virtual",
   "toolchain": {
     "android_sdk": "/Library/Android/sdk",
     "java_home": "",
@@ -45,7 +47,32 @@
     "bundle_id": "com.usbank.SpendManagement.staging",
     "native_dependencies_url": "https://gitlab.us.bank-dns.com/BENTO/bento.mobileapp.git"
   },
-  "android": {"task": ":app:assembleSpendmanagementReleaseStaging", "package_id": "com.usbank.spendmanagement"},
+  "android": {
+    "package_id": "com.usbank.spendmanagement",
+    "versioning": {
+      "initial_build_number": 308,
+      "code_offset": 100,
+      "name_prefix": "2.0"
+    },
+    "variants": {
+      "stage": {
+        "task": ":app:assembleSpendmanagementReleaseStaging",
+        "environment": "stage",
+        "apk_path": "android/app/build/outputs/apk/spendmanagement/releaseStaging",
+        "mapping_path": "android/app/build/outputs/mapping/spendmanagementReleaseStaging/mapping.txt",
+        "label": "Stage",
+        "webview_login": ""
+      },
+      "developer": {
+        "task": ":app:assembleDeveloperReleaseStaging",
+        "environment": "stage",
+        "apk_path": "android/app/build/outputs/apk/developer/releaseStaging",
+        "mapping_path": "android/app/build/outputs/mapping/developerReleaseStaging/mapping.txt",
+        "label": "Developer",
+        "webview_login": "false"
+      }
+    }
+  },
   "minimum_free_gb": 40,
   "window_minutes": 120
 }

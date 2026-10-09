@@ -15,6 +15,7 @@ async function meta() {
   el('login').hidden=true; el('workspace').hidden=false; el('logout').hidden=false;
   el('project').textContent=`${m.source_provider === 'github' ? 'GitHub' : 'GitLab'} · ${m.project}`; el('storage').textContent=m.storage;
   if(!el('workflow').options.length) {for(const [key,value] of Object.entries(m.workflows)) {const o=text('option',value); o.value=key; el('workflow').append(o);} el('workflow').value=m.default_workflow || 'both-dev';}
+  if(!el('branch').options.length) {const branches=await api('/api/branches');for(const value of branches){const o=text('option',value);o.value=value;el('branch').append(o);}el('branch').value=branches.includes(m.branch)?m.branch:'dev';el('branch').disabled=m.backend!=='local';}
   el('window').textContent=m.ready ? 'Pilot window open until ' + new Date(m.window.expires_at*1000).toLocaleTimeString() + '. Keep Bitrise stopped until the new jobs finish.' : m.reason;
   el('window').className='notice'+(m.ready?' ready':''); el('run').disabled=!m.ready;
 }
@@ -32,7 +33,7 @@ function artifacts(container, manifests) {
 async function detail() {
   if(!selected)return;
   const d=await api(`/api/builds/${selected}`);
-  el('detail-title').textContent=`Run #${selected} · ${d.pipeline.status}`;
+  el('detail-title').textContent=`Run #${selected} · ${d.pipeline.ref || 'dev'} · ${d.pipeline.status}`;
   el('detail-empty').hidden=!d.pipeline.error;el('detail-empty').textContent=d.pipeline.error || '';
   el('cancel').hidden=!['running','pending','created','preparing'].includes(d.pipeline.status);
   el('jobs').replaceChildren(); const ms=[];
@@ -47,14 +48,14 @@ async function loadLog(){if(!selectedJob)return;el('log-section').hidden=false;t
 async function refresh(){
   if(polling)return;polling=true;
   try{await meta(); const [builds,local]=await Promise.allSettled([api('/api/builds'),api('/api/local-artifacts')]);
-    if(builds.status==='fulfilled'){el('builds').replaceChildren();if(!builds.value.length)el('builds').append(text('p','Your first run will appear here.','muted'));for(const b of builds.value){const r=text('button',`#${b.id}`, 'build-row');r.append(status(b.status),text('small',`${b.name.replace('Bento Mac / ','')} · ${b.sha.slice(0,8)}`),text('small',new Date(b.created_at).toLocaleString()));r.onclick=()=>{selected=b.id;selectedJob=null;detail().catch(e=>message(e.message));};el('builds').append(r);}}
+    if(builds.status==='fulfilled'){el('builds').replaceChildren();if(!builds.value.length)el('builds').append(text('p','Your first run will appear here.','muted'));for(const b of builds.value){const r=text('button',`#${b.id}`, 'build-row');r.append(status(b.status),text('small',`${b.name.replace('Bento Mac / ','')} · ${b.ref || 'dev'} · ${b.sha.slice(0,8)}`),text('small',new Date(b.created_at).toLocaleString()));r.onclick=()=>{selected=b.id;selectedJob=null;detail().catch(e=>message(e.message));};el('builds').append(r);}}
     else message(builds.reason.message);
     if(local.status==='fulfilled')artifacts(el('local-artifacts'),local.value);else message(local.reason.message);
     await detail();
   }finally{polling=false;}
 }
 el('login-form').onsubmit=async e=>{e.preventDefault();try{const form=new FormData(e.target);await api('/api/login',{method:'POST',body:JSON.stringify(Object.fromEntries(form))});e.target.reset();message();await refresh();}catch(e){message(e.message);}};
-el('launch-form').onsubmit=async e=>{e.preventDefault();el('run').disabled=true;try{const r=await api('/api/builds',{method:'POST',body:JSON.stringify({workflow:el('workflow').value,request_id:crypto.randomUUID()})});selected=r.id;selectedJob=null;message();await refresh();}catch(e){message(e.message);}finally{await meta().catch(()=>{});}};
+el('launch-form').onsubmit=async e=>{e.preventDefault();el('run').disabled=true;try{const r=await api('/api/builds',{method:'POST',body:JSON.stringify({workflow:el('workflow').value,branch:el('branch').value,request_id:crypto.randomUUID()})});selected=r.id;selectedJob=null;message();await refresh();}catch(e){message(e.message);}finally{await meta().catch(()=>{});}};
 el('cancel').onclick=async()=>{try{await api(`/api/builds/${selected}/cancel`,{method:'POST',body:'{}'});await refresh();}catch(e){message(e.message);}};
 el('logout').onclick=async()=>{await api('/api/logout',{method:'POST',body:'{}'});selected=selectedJob=null;showLogin();};
 el('refresh').onclick=()=>refresh().catch(e=>message(e.message));

@@ -112,15 +112,15 @@ Check GitLab for running/pending pilot jobs, cancel pending jobs if needed, and 
 | Component | Included behavior |
 |---|---|
 | Dashboard | Sign-in, dev workflow selection, recent pipelines, jobs, updating logs, cancel, retry, local downloads and Artifactory links |
-| Workflows | `both-dev`, `android-dev`, `ios-dev`, `validate-dev` |
-| Android | Explicit usbank/dev config; releaseStaging APK; current debug key or optional Secrets Manager key; package/signature verification |
-| iOS | Existing staging app identity with dev config; locked pods; temporary certificate keychain/profiles; archive, IPA and dSYMs; signature checks |
+| Workflows | `both-dev`, `android-stage`, `android-developer`, `ios-dev`, `ios-developer`, `validate-dev` |
+| Android | Explicit usbank/stage config; Stage and Developer releaseStaging APKs; Bitrise pinning/root/screenshot flags and numbering; repository debug key; package/signature verification |
+| iOS | Existing Stage and Developer identities with stage config; locked pods; temporary certificate keychain/profiles; archive, IPA and dSYMs; signature checks |
 | Credentials | Local private JSON for initial tests, or AWS SDK/instance role; temporary build credentials removed on normal exit/cancellation |
 | Storage | Local files by pipeline/job/platform; optional checksum-verified Artifactory binary uploads; failed upload remains a failed job |
 | Coexistence | Manual exclusive window, new-system host lock, recognized Bitrise process guard, no existing Bitrise service changes |
 | Recovery | iOS keychain/profile cleanup journal; old artifacts retained; independent local download endpoint |
 
-This is a **bounded pilot**, not full Bitrise workflow parity. Production, all legacy brand workflows, automatic branch/MR triggers, TestFlight/Firebase distribution, shared release numbering, SSO and a shared two-scheduler admission controller are later steps.
+This is a **bounded pilot**, not full Bitrise workflow parity. Production, all legacy brand workflows, automatic branch/MR triggers, TestFlight/Firebase distribution, cross-system release-number coordination, SSO and a shared two-scheduler admission controller are later steps.
 
 ## Repository baseline and verification limits
 

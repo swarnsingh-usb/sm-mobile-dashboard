@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 import requests
 
-from .core import ROOT, GitLab, SafeError, Secrets, atomic_json, digest, load_config
+from .core import ROOT, WORKFLOWS, GitLab, SafeError, Secrets, atomic_json, digest, load_config
 from .locking import bitrise_processes, open_window
 from . import source as sources
 
@@ -167,6 +167,23 @@ def portal_credentials(c):
                            session_key=session_key if len(session_key) >= 32 else secrets.token_urlsafe(48))
     atomic_json(path, values)
     print('Dashboard login saved privately. Restart the dashboard if it is running.')
+
+
+def android_environment_credentials(c):
+    if c.get('credential_source') != 'local' or not sys.stdin.isatty():
+        raise SafeError('Use ./bento android-environment-credentials interactively in local credential mode.')
+    store = Secrets(c)
+    path = store.local_path()
+    if path.exists() and (path.is_symlink() or path.stat().st_uid != os.getuid() or path.stat().st_mode & 0o077):
+        raise SafeError('Local credential file must be owned by this user, chmod 600, and not a symlink.')
+    values = json.loads(path.read_text()) if path.exists() else {}
+    environment = values.setdefault('android_environment', {})
+    for field in ('ssl_certificate', 'ssl_certificate_backup'):
+        environment[field] = getpass.getpass(f'android_environment.{field}: ') or environment.get(field, '')
+    atomic_json(path, values)
+    store.get('android_environment', fresh=True,
+              required_fields=('ssl_certificate', 'ssl_certificate_backup'))
+    print('Android certificate pins saved privately with mode 0600.')
 
 
 def credentials(c, validation=False):
@@ -414,7 +431,7 @@ def doctor(c, online=False, build_only=False, validation=False):
                 failures.append(name)
             elif name == 'Node' and text[0] != 'v20.19.4': failures.append('Node version')
             elif name == 'Yarn' and text[0] != '1.22.22': failures.append('Yarn version')
-            elif name == 'Java' and not re.search(r'version "17[.\"]', text[0]): failures.append('Java 17 required')
+            elif name == 'Java' and not any(re.search(r'version "17[.\"]', line) for line in text): failures.append('Java 17 required')
             elif name == 'Xcode' and (not c['toolchain']['expected_xcode'] or text[0] != 'Xcode ' + c['toolchain']['expected_xcode']): failures.append('qualified Xcode version')
             elif name == 'CocoaPods' and text[0] != c['toolchain']['expected_pod']: failures.append('CocoaPods version')
             elif name == 'Ruby':
@@ -509,7 +526,7 @@ def recover():
 def main():
     os.umask(0o077)
     p = argparse.ArgumentParser(description='Bento Mac CI')
-    p.add_argument('command', choices=['setup','configure','native-tools','source','check-source','portal-credentials','run','worker','credentials','test-build','tools','generate','register','services','doctor','serve','runner','build','open-window','close-window','recover-signing','install-pipeline'])
+    p.add_argument('command', choices=['setup','configure','native-tools','source','check-source','portal-credentials','android-environment-credentials','run','worker','credentials','test-build','tools','generate','register','services','doctor','serve','runner','build','open-window','close-window','recover-signing','install-pipeline'])
     p.add_argument('argument', nargs='?')
     p.add_argument('--online', action='store_true')
     p.add_argument('--no-start', action='store_true')
@@ -565,9 +582,15 @@ def main():
         elif args.command == 'source': select_source(args.argument, args.backend, args.ssh_key, args.transport, args.auth)
         elif args.command == 'check-source': check_source(load_config(), validation=args.validation)
         elif args.command == 'portal-credentials': portal_credentials(load_config())
+        elif args.command == 'android-environment-credentials': android_environment_credentials(load_config())
         elif args.command in ('run', 'worker'):
             from .local_runner import worker
-            workflow = (args.argument or 'both').removesuffix('-dev') + '-dev' if args.command == 'run' else None
+            aliases = {'both': 'both-dev', 'android': 'android-stage', 'android-stage': 'android-stage',
+                       'android-developer': 'android-developer', 'ios': 'ios-dev',
+                       'ios-stage': 'ios-dev', 'ios-developer': 'ios-developer'}
+            workflow = aliases.get(args.argument or 'both', args.argument) if args.command == 'run' else None
+            if workflow and workflow not in WORKFLOWS:
+                raise SafeError('Unknown local workflow. Use both, android-stage, android-developer, ios-stage, ios-developer, or validate-dev.')
             worker(once=args.once, workflow=workflow)
         elif args.command == 'credentials': credentials(load_config(), validation=args.validation)
         elif args.command == 'test-build':

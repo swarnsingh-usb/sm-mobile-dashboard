@@ -59,12 +59,15 @@ The wizard then asks for `github.token`, an approved repository-read token. A te
 
 ```bash
 ./bento credentials
+./bento android-environment-credentials
 ./bento doctor --online --build-only
 ```
 
 With GitHub SSH, the wizard needs npm/Maven credentials and existing iOS signing assets only. AWS Secrets Manager can wait. Android keeps its configured signing behavior. A terminal build needs no dashboard login.
 
 **The app still downloads private npm/Maven dependencies from `artifactory.us.bank-dns.com`.** If that host is blocked too, the Cloud admin must restore access. Keep certificate verification enabled. Optional artifact *uploads* can stay disabled independently.
+
+The first Android build also populates private, checksum-verified Gradle distribution and pinned JitPack artifact caches under `data/cache/`. Disposable builds use those local files when the bank network permits verified dashboard downloads but blocks Java from the corresponding public hosts. A checksum mismatch stops the build and requires manual cache inspection.
 
 Drain Bitrise and temporarily stop its agent through your existing procedure, preventing auto-restart during the pilot. Keep its installation and configuration. Then:
 
@@ -73,7 +76,7 @@ Drain Bitrise and temporarily stop its agent through your existing procedure, pr
 ./bento run both
 ```
 
-This fetches remote `dev`, pins one SHA, and builds Android then iOS in separate disposable checkouts. No manual app clone is needed. Private iOS CocoaPods dependencies use the chosen provider, preserving locked commits and deployment-mode installation. The first failure stops the run; later jobs are skipped. `./bento run android` or `./bento run ios` starts a new attempt at current remote dev.
+This fetches the selected remote branch, pins one SHA, and builds Android then the Stage iOS target in separate disposable checkouts. No manual app clone is needed. Private iOS CocoaPods dependencies use the chosen provider, preserving locked commits and deployment-mode installation. The first failure stops the run; later jobs are skipped. `./bento run android-stage` and `./bento run android-developer` match the standard Stage and Developer Bitrise flavors; both use the Stage app environment, repository debug signing, SSL pinning/root-detection overrides, and local downloads only. `./bento run ios-stage` and `./bento run ios-developer` select the corresponding iOS target.
 
 Logs/status remain in `data/local-runs/<run-id>/`; binaries/manifests remain in `data/artifacts/<run-id>/<job-id>/<platform>/`. Records include provider, repository and SHA. The existing Artifactory uploader is used only when configured. No store, TestFlight or Firebase release is made.
 

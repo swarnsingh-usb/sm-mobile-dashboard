@@ -108,7 +108,8 @@ def tool_env(c, root=ROOT, native=True):
     for key in list(env):
         if key.startswith(('BITRISE', 'AWS_ACCESS_KEY', 'AWS_SECRET_ACCESS', 'AWS_SESSION_TOKEN')) or key in (
                 'NODE_TLS_REJECT_UNAUTHORIZED', 'NPM_CONFIG_STRICT_SSL', 'YARN_STRICT_SSL',
-                'GIT_SSL_NO_VERIFY', 'COREPACK_INTEGRITY_KEYS', 'USE_PUBLIC_REPOS'):
+                'GIT_SSL_NO_VERIFY', 'COREPACK_INTEGRITY_KEYS', 'USE_PUBLIC_REPOS',
+                'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS', 'JAVA_OPTS', 'GRADLE_OPTS'):
             env.pop(key, None)
     t = c['toolchain']
     paths = [str(Path(root) / 'tools/node/bin'), str(Path(root) / 'tools/yarn/bin')]
@@ -123,6 +124,14 @@ def tool_env(c, root=ROOT, native=True):
                    DEVELOPER_DIR=t['developer_dir'])
     if native and t['java_home']:
         env['JAVA_HOME'] = t['java_home']
+    if t['ruby_bin']:
+        ruby_home = Path(t['ruby_bin']).resolve().parent
+        if ruby_home.parent.name == 'rubies':
+            rvm_root = ruby_home.parent.parent
+            gem_home = rvm_root / 'gems' / ruby_home.name
+            if gem_home.is_dir():
+                env.update(GEM_HOME=str(gem_home), GEM_PATH=os.pathsep.join((str(gem_home), str(gem_home) + '@global')),
+                           MY_RUBY_HOME=str(ruby_home))
     if c['ca_bundle']:
         for key in ('NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE', 'GIT_SSL_CAINFO'):
             env[key] = c['ca_bundle']
@@ -136,7 +145,74 @@ def private_file(path, data):
     return path
 
 
-def prepare(c, secret_store, cmd, repo, temp, native=True):
+def configure_maven_downloads(c, dependencies, cmd, temp):
+    repository = c['maven_repository']
+    host = urlsplit(repository).hostname
+    username = dependencies['maven_username']
+    password = dependencies['npm_token']
+    if any(re.search(r'\s', value) for value in (username, password)):
+        raise SafeError('Maven credentials cannot contain whitespace.')
+    curl_home = Path(temp) / 'curl'
+    curl_home.mkdir(mode=0o700)
+    netrc = private_file(curl_home / 'netrc', f'machine {host}\nlogin {username}\npassword {password}\n')
+    private_file(curl_home / '.curlrc', f'netrc-file = "{netrc}"\n')
+    cmd.env.update(ENTERPRISE_REPOSITORY=repository, CURL_HOME=str(curl_home))
+    gradle_home = Path(cmd.env['GRADLE_USER_HOME'])
+    gradle_home.mkdir(mode=0o700)
+    private_file(gradle_home / 'init.gradle', '''
+def enterpriseRepository = System.getenv('ENTERPRISE_REPOSITORY')
+def enterpriseUsername = System.getenv('ORG_GRADLE_PROJECT_artifactory_username')
+def enterprisePassword = System.getenv('ORG_GRADLE_PROJECT_artifactory_password')
+def localMavenRepository = System.getenv('LOCAL_MAVEN_REPOSITORY')
+def addLocalMavenRepository = { repositories ->
+    if (localMavenRepository) {
+        repositories.maven {
+            url = localMavenRepository
+            metadataSources {
+                mavenPom()
+                artifact()
+            }
+            content {
+                includeGroup('com.github.yalantis')
+                includeGroup('com.github.zacharee')
+                includeGroup('com.github.ybq')
+            }
+        }
+    }
+}
+def addEnterpriseRepository = { repositories ->
+    repositories.maven {
+        url = enterpriseRepository
+        credentials {
+            username = enterpriseUsername
+            password = enterprisePassword
+        }
+    }
+}
+beforeSettings { settings ->
+    addLocalMavenRepository(settings.pluginManagement.repositories)
+    addEnterpriseRepository(settings.pluginManagement.repositories)
+    addLocalMavenRepository(settings.dependencyResolutionManagement.repositories)
+    addEnterpriseRepository(settings.dependencyResolutionManagement.repositories)
+}
+allprojects {
+    addLocalMavenRepository(buildscript.repositories)
+    addEnterpriseRepository(buildscript.repositories)
+    addLocalMavenRepository(repositories)
+    addEnterpriseRepository(repositories)
+}
+'''.lstrip())
+
+
+def accept_hermes_checksum(before, after):
+    pattern = r'(?m)^  hermes-engine: ([0-9a-f]{40})$'
+    old = re.findall(pattern, before)
+    new = re.findall(pattern, after)
+    if len(old) != 1 or len(new) != 1 or re.sub(pattern, f'  hermes-engine: {new[0]}', before) != after:
+        raise SafeError('CocoaPods changed more than the expected Hermes mirror checksum.')
+
+
+def prepare(c, secret_store, cmd, repo, temp, native=True, environment='dev'):
     fields = ('npm_token', 'maven_username', 'maven_password') if native else ('npm_token',)
     dependencies = secret_store.get('dependencies', fresh=True, required_fields=fields)
     for key in fields:
@@ -154,6 +230,7 @@ def prepare(c, secret_store, cmd, repo, temp, native=True):
     if native:
         cmd.env.update(ORG_GRADLE_PROJECT_artifactory_username=dependencies['maven_username'],
                        ORG_GRADLE_PROJECT_artifactory_password=dependencies['maven_password'])
+        configure_maven_downloads(c, dependencies, cmd, temp)
     node = cmd.run(['node', '--version'], capture=True).strip()
     yarn = cmd.run(['yarn', '--version'], capture=True).strip()
     if node != 'v20.19.4' or yarn != '1.22.22' or (repo / '.nvmrc').read_text().strip() != '20.19.4':
@@ -166,19 +243,271 @@ def prepare(c, secret_store, cmd, repo, temp, native=True):
         cmd.run(['/bin/bash', '-e', str(repo / 'scripts' / script)], repo, label=script)
     if digest(repo / 'yarn.lock') != lock_before:
         raise SafeError('Dependency installation changed yarn.lock.')
-    cmd.run(['/bin/bash', '-e', 'scripts/prebuild.sh', '-b', 'usbank', '-e', 'dev'], repo, label='Select usbank / dev environment')
-    if (repo / '.env').read_bytes() != (repo / 'environments/dev/usbank.env').read_bytes():
-        raise SafeError('Environment output differs from the dev configuration.')
+    if not re.fullmatch(r'[a-z][a-z0-9-]*', environment):
+        raise SafeError('Invalid build environment.')
+    expected_environment = repo / 'environments' / environment / 'usbank.env'
+    if not expected_environment.is_file():
+        raise SafeError(f'Missing usbank / {environment} environment configuration.')
+    cmd.run(['/bin/bash', '-e', 'scripts/prebuild.sh', '-b', 'usbank', '-e', environment], repo,
+            label=f'Select usbank / {environment} environment')
+    if (repo / '.env').read_bytes() != expected_environment.read_bytes():
+        raise SafeError(f'Environment output differs from the {environment} configuration.')
     # Protect against xcode shell phases that otherwise source a stale developer-local Node path.
     private_file(repo / 'ios/.xcode.env.local', 'export NODE_BINARY=' + __import__('shlex').quote(cmd.env['NODE_BINARY']) + '\n')
     return {'node': node, 'yarn': yarn}
 
 
-def android(c, secret_store, cmd, repo, temp, output):
+def android_configuration(c, variant='stage'):
+    config = dict(c['android'])
+    variants = config.pop('variants', {})
+    selected = variants.get(variant)
+    if not isinstance(selected, dict):
+        raise SafeError('Unknown Android build variant.')
+    config.update(selected)
+    if any(not isinstance(config.get(key), str) or not config[key]
+           for key in ('task', 'package_id', 'environment', 'apk_path', 'mapping_path', 'label')):
+        raise SafeError('Android build configuration is incomplete.')
+    if not isinstance(config.get('webview_login'), str):
+        raise SafeError('Android webview login configuration is invalid.')
+    if not re.fullmatch(r':app:assemble[A-Za-z0-9]+', config['task']):
+        raise SafeError('Invalid Android Gradle task.')
+    for key in ('apk_path', 'mapping_path'):
+        path = Path(config[key])
+        if path.is_absolute() or '..' in path.parts:
+            raise SafeError('Invalid Android artifact path.')
+    return config
+
+
+def configure_android_environment(secret_store, cmd, repo, android_config):
+    pins = secret_store.get('android_environment', fresh=True,
+                            required_fields=('ssl_certificate', 'ssl_certificate_backup'))
+    for value in pins.values():
+        if not isinstance(value, str) or not value or any(character in value for character in ('\n', '\r', '\0')):
+            raise SafeError('Android environment credentials contain an invalid certificate value.')
+        cmd.sensitive.add(value)
+    overrides = {
+        'ENABLE_SSL_PINNING': 'true',
+        'ENABLE_JAILBREAK_ROOT_DETECTION': 'true',
+        'SSL_CERTIFICATE': pins['ssl_certificate'],
+        'SSL_CERTIFICATE_BACKUP': pins['ssl_certificate_backup'],
+        'ENABLE_SCREENSHOTS': 'true',
+        'REACT_APP_FEATUREFLAG_BIZ1476_ENABLE_WEBVIEW_LOGIN': android_config['webview_login'],
+        'HIDE_BENTO_LOGIN_FOOTER_LINK': 'false',
+    }
+    with (repo / '.env').open('a') as environment:
+        environment.write('\n' + ''.join(f'{key}={value}\n' for key, value in overrides.items()))
+
+
+def allocate_android_version(c):
+    versioning = c['android'].get('versioning', {})
+    try:
+        initial = int(versioning['initial_build_number'])
+        offset = int(versioning['code_offset'])
+    except (KeyError, TypeError, ValueError):
+        raise SafeError('Android versioning configuration is incomplete.') from None
+    prefix = versioning.get('name_prefix')
+    if initial < 1 or offset < 0 or not isinstance(prefix, str) or not re.fullmatch(r'\d+\.\d+', prefix):
+        raise SafeError('Android versioning configuration is invalid.')
+    state_path = ROOT / 'data/android-build-number.json'
+    last = initial
+    if state_path.exists():
+        try:
+            last = int(json.loads(state_path.read_text())['last_build_number'])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            raise SafeError('Android build-number state is invalid; inspect it before another build.') from None
+        if last < initial:
+            raise SafeError('Android build-number state is behind the configured baseline.')
+    build_number = last + 1
+    version_code = build_number + offset
+    if version_code > 2_100_000_000:
+        raise SafeError('Android versionCode exceeds the Google Play limit.')
+    atomic_json(state_path, {'last_build_number': build_number})
+    return {'build_number': build_number, 'version_code': version_code,
+            'version_name': f'{prefix}.{build_number}'}
+
+
+def apply_android_version(repo, version):
+    path = repo / 'android/app/build.gradle'
+    text = path.read_text()
+    code_pattern = r'(?m)^(\s*)versionCode\s*=\s*\d+\s*$'
+    name_pattern = r'(?m)^(\s*)versionName\s*=\s*"[^"]+"\s*$'
+    if len(re.findall(code_pattern, text)) != 1 or len(re.findall(name_pattern, text)) != 1:
+        raise SafeError('Expected one Android versionCode and versionName assignment.')
+    text = re.sub(code_pattern, rf'\g<1>versionCode = {version["version_code"]}', text)
+    text = re.sub(name_pattern, rf'\g<1>versionName = "{version["version_name"]}"', text)
+    path.write_text(text)
+
+
+def configure_java_trust(c, cmd, temp):
+    if sys.platform == 'darwin':
+        cmd.env['JAVA_TOOL_OPTIONS'] = ('-Djavax.net.ssl.trustStoreType=KeychainStore '
+                                        '-Djavax.net.ssl.trustStore=NONE')
+        return
+    java_home = Path(cmd.env.get('JAVA_HOME', ''))
+    default_store = java_home / 'lib/security/cacerts'
+    keytool = java_home / 'bin/keytool'
+    if not default_store.is_file() or not keytool.is_file():
+        raise SafeError('JDK 17 truststore or keytool is missing.')
+    truststore = private_file(temp / 'java-cacerts', default_store.read_bytes())
+    if c['ca_bundle']:
+        try:
+            bundle = Path(c['ca_bundle']).read_text()
+        except OSError:
+            raise SafeError('Configured CA bundle cannot be read.') from None
+        certificates = re.findall(r'-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----',
+                                  bundle, flags=re.S)
+        if not certificates:
+            raise SafeError('Configured CA bundle contains no PEM certificates.')
+        for index, certificate in enumerate(certificates):
+            cert = private_file(temp / f'bank-ca-{index}.pem', certificate + '\n')
+            cmd.run([keytool, '-importcert', '-noprompt', '-storepass', 'changeit',
+                     '-keystore', truststore, '-alias', f'bento-bank-ca-{index}', '-file', cert],
+                    capture=True, label='Add approved CA to Java truststore')
+    cmd.env['JAVA_TOOL_OPTIONS'] = ('-Djavax.net.ssl.trustStore=' + str(truststore) +
+                                    ' -Djavax.net.ssl.trustStorePassword=changeit')
+
+
+GRADLE_DISTRIBUTION_NAME = 'gradle-8.14.3-bin.zip'
+GRADLE_DISTRIBUTION_SHA256 = 'bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531'
+GRADLE_DISTRIBUTION_URL = 'https://downloads.gradle.org/distributions/' + GRADLE_DISTRIBUTION_NAME
+JITPACK_FILES = {
+    'com/github/yalantis/ucrop/2.2.11/ucrop-2.2.11.pom':
+        '1e070fcc04b929e8b0f847463240550a1639e4bc2e7110b0a57f4f1366247580',
+    'com/github/yalantis/ucrop/2.2.11/ucrop-2.2.11.aar':
+        'c12db23784aaa954d8998106cf5c1cfee2993c62f7601c790da8e21d4c51a0a9',
+    'com/github/zacharee/AndroidPdfViewer/4.0.1/AndroidPdfViewer-4.0.1.pom':
+        'a9006febc8a96e30dcab3d5fdedc08985717ab62a6233eccc34efc492a9053ec',
+    'com/github/zacharee/AndroidPdfViewer/4.0.1/AndroidPdfViewer-4.0.1.aar':
+        '6465b8febdbf75172890accd2dd19e45aeab9c2ff328bc11bd8db292a74454dc',
+    'com/github/ybq/Android-SpinKit/1.4.0/Android-SpinKit-1.4.0.pom':
+        'cee6e4a9e11e87fafa6957117c3f1eec80a6b0f2fef06e1b6cf50716481b9dbe',
+    'com/github/ybq/Android-SpinKit/1.4.0/Android-SpinKit-1.4.0.aar':
+        '3d1bb6b05feb0c62f92d174b0d32a611da238a22a929fe1db2b0f7c4fb58ede2',
+}
+
+
+def cached_jitpack_repository(c):
+    repository = ROOT / 'data/cache/jitpack'
+    repository.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for relative, expected in JITPACK_FILES.items():
+        artifact = repository / relative
+        if artifact.exists():
+            if not artifact.is_file() or artifact.is_symlink() or digest(artifact) != expected:
+                raise SafeError('Cached JitPack artifact failed checksum validation; inspect and remove it manually.')
+            continue
+        artifact.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, temporary = tempfile.mkstemp(dir=artifact.parent, prefix=artifact.name + '.', suffix='.part')
+        os.close(fd)
+        temporary = Path(temporary)
+        try:
+            with requests.get('https://jitpack.io/' + relative, stream=True,
+                              verify=c['ca_bundle'] or True, timeout=(15, 120)) as response:
+                if response.status_code != 200 or urlsplit(response.url).hostname not in ('jitpack.io', 'www.jitpack.io'):
+                    raise SafeError('Could not download a qualified JitPack artifact.')
+                size = 0
+                with temporary.open('wb') as output:
+                    for chunk in response.iter_content(64 * 1024):
+                        size += len(chunk)
+                        if size > 5 * 1024 * 1024:
+                            raise SafeError('JitPack artifact exceeded the qualified size limit.')
+                        output.write(chunk)
+            if digest(temporary) != expected:
+                raise SafeError('Downloaded JitPack artifact failed checksum validation.')
+            temporary.chmod(0o600)
+            os.replace(temporary, artifact)
+        except requests.RequestException:
+            raise SafeError('Could not download a qualified JitPack artifact.') from None
+        finally:
+            temporary.unlink(missing_ok=True)
+    return repository
+
+
+def download_gradle_distribution(c, destination):
+    chunk_size = 4 * 1024 * 1024
+    maximum_size = 300 * 1024 * 1024
+    offset = 0
+    total = None
+    print('\n→ Download pinned Gradle distribution')
+    with destination.open('wb') as output:
+        while total is None or offset < total:
+            requested_end = offset + chunk_size - 1
+            for attempt in range(4):
+                try:
+                    with requests.get(
+                            GRADLE_DISTRIBUTION_URL,
+                            headers={'Range': f'bytes={offset}-{requested_end}'},
+                            stream=True,
+                            verify=c['ca_bundle'] or True,
+                            timeout=(15, 120)) as response:
+                        content_range = re.fullmatch(
+                            r'bytes (\d+)-(\d+)/(\d+)', response.headers.get('Content-Range', ''))
+                        if response.status_code != 206 or not content_range:
+                            raise ValueError('server did not honor the range request')
+                        start, end, response_total = map(int, content_range.groups())
+                        if start != offset or end > requested_end or response_total > maximum_size:
+                            raise ValueError('server returned unexpected archive bounds')
+                        if total is not None and response_total != total:
+                            raise ValueError('server changed the archive size')
+                        written = 0
+                        for chunk in response.iter_content(64 * 1024):
+                            output.write(chunk)
+                            written += len(chunk)
+                        if written != end - start + 1:
+                            raise ValueError('server returned an incomplete range')
+                        total = response_total
+                        offset += written
+                        break
+                except (requests.RequestException, ValueError):
+                    output.seek(offset)
+                    output.truncate()
+                    if attempt == 3:
+                        raise SafeError('Could not download a complete Gradle distribution range.') from None
+                    time.sleep(2 ** attempt)
+
+
+def cached_gradle_distribution(c, _cmd):
+    directory = ROOT / 'data/cache/gradle'
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    archive = directory / GRADLE_DISTRIBUTION_NAME
+    if archive.exists():
+        if not archive.is_file() or archive.is_symlink() or digest(archive) != GRADLE_DISTRIBUTION_SHA256:
+            raise SafeError('Cached Gradle distribution failed checksum validation; inspect and remove it manually.')
+        return archive
+    fd, temporary = tempfile.mkstemp(dir=directory, prefix=GRADLE_DISTRIBUTION_NAME + '.', suffix='.part')
+    os.close(fd)
+    temporary = Path(temporary)
+    try:
+        download_gradle_distribution(c, temporary)
+        if digest(temporary) != GRADLE_DISTRIBUTION_SHA256:
+            raise SafeError('Downloaded Gradle distribution failed checksum validation.')
+        temporary.chmod(0o600)
+        os.replace(temporary, archive)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return archive
+
+
+def configure_gradle_distribution(repo, archive):
+    properties = repo / 'android/gradle/wrapper/gradle-wrapper.properties'
+    text = properties.read_text()
+    source = 'distributionUrl=https\\://services.gradle.org/distributions/gradle-8.14.3-bin.zip'
+    local = 'distributionUrl=' + archive.resolve().as_uri().replace(':', '\\:', 1)
+    if text.count(source) != 1:
+        raise SafeError('Gradle wrapper distribution changed; qualify its direct URL and checksum.')
+    if 'distributionSha256Sum=' in text:
+        if f'distributionSha256Sum={GRADLE_DISTRIBUTION_SHA256}' not in text:
+            raise SafeError('Gradle wrapper checksum differs from the qualified value.')
+    else:
+        text += f'distributionSha256Sum={GRADLE_DISTRIBUTION_SHA256}\n'
+    properties.write_text(text.replace(source, local))
+
+
+def android(c, secret_store, cmd, repo, temp, output, android_config, version):
     sdk = Path(c['toolchain']['android_sdk'])
     for needed in ('platforms/android-36/android.jar', 'build-tools/36.0.0/aapt', 'ndk/27.0.12077973/source.properties'):
         if not (sdk / needed).exists():
             raise SafeError(f'Missing Android SDK component: {needed}. See ./bento doctor.')
+    configure_java_trust(c, cmd, temp)
     java = cmd.run(['java', '-version'], capture=True, label='Check Java')
     if not re.search(r'version "17[.\"]', java):
         raise SafeError('Android requires Java 17. Set toolchain.java_home to the existing JDK 17.')
@@ -194,27 +523,45 @@ def android(c, secret_store, cmd, repo, temp, output):
                        BENTO_KEY_ALIAS=s['key_alias'], BENTO_KEY_PASSWORD=s['key_password'])
         init = ['-I', str(ROOT / 'scripts/android-signing.gradle')]
         signing = 'local-file-key' if c.get('credential_source') == 'local' else 'secrets-manager-key'
-    cmd.run(['/bin/bash', './gradlew', '--no-daemon', '--console=plain', *init, c['android']['task']], repo / 'android', label='Build Android dev APK')
-    apks = list((repo / 'android/app/build/outputs/apk/spendmanagement/releaseStaging').glob('*.apk'))
+    cmd.env['LOCAL_MAVEN_REPOSITORY'] = cached_jitpack_repository(c).resolve().as_uri()
+    configure_gradle_distribution(repo, cached_gradle_distribution(c, cmd))
+    cmd.run(['/bin/bash', './gradlew', '--no-daemon', '--console=plain', *init, android_config['task']],
+        repo / 'android', label=f'Build Android {android_config["label"]} APK')
+    apks = list((repo / android_config['apk_path']).glob('*.apk'))
     if not apks:
         raise SafeError('Gradle completed but the expected APK was not found.')
     metadata = []
     for apk in apks:
         info = cmd.run([sdk / 'build-tools/36.0.0/aapt', 'dump', 'badging', apk], capture=True, label='Verify Android identity')
         m = re.search(r"package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'", info)
-        if not m or m[1] != c['android']['package_id']:
+        if not m or m[1] != android_config['package_id']:
             raise SafeError('APK application ID did not match the configured identity.')
         cmd.run([sdk / 'build-tools/36.0.0/apksigner', 'verify', apk], capture=True, label='Verify APK signature')
         shutil.copy2(apk, output / apk.name)
         metadata.append({'file': apk.name, 'app_id': m[1], 'build_number': m[2], 'version': m[3]})
-    mapping = repo / 'android/app/build/outputs/mapping/spendmanagementReleaseStaging/mapping.txt'
+    mapping = repo / android_config['mapping_path']
     if mapping.exists():
         shutil.copy2(mapping, output / 'mapping.txt')
-    return {'signing': signing, 'apps': metadata, 'java': java.splitlines()[0]}
+    return {'signing': signing, 'apps': metadata, 'java': java.splitlines()[0],
+        'bitrise_build_number': version['build_number']}
+
+
+def ios_configuration(c, variant=None):
+    config = dict(c['ios'])
+    variants = config.pop('variants', {})
+    if variant:
+        selected = variants.get(variant)
+        if not isinstance(selected, dict):
+            raise SafeError('Unknown iOS build variant.')
+        config.update(selected)
+    if any(not isinstance(config.get(key), str) or not config[key]
+           for key in ('workspace', 'scheme', 'bundle_id')):
+        raise SafeError('iOS build configuration is incomplete.')
+    return config
 
 
 @contextlib.contextmanager
-def ios_signing(c, store, cmd, temp):
+def ios_signing(c, store, cmd, temp, ios_config):
     s = store.get('ios', fresh=True)
     for k in ('p12_password', 'team_id', 'signing_identity'):
         if not s.get(k):
@@ -270,7 +617,7 @@ def ios_signing(c, store, cmd, temp):
                     installed.append(str(destination))
                     atomic_json(journal, {'keychains': old_keys, 'temporary_keychain': str(keychain), 'profiles': installed})
                     private_file(destination, profile.read_bytes())
-        app_profile = exports.get('provisioningProfiles', {}).get(c['ios']['bundle_id'])
+        app_profile = exports.get('provisioningProfiles', {}).get(ios_config['bundle_id'])
         if not app_profile or not any(app_profile in (p['Name'], p['UUID']) for p in profiles):
             raise SafeError('export_options.provisioningProfiles must map the app ID to an included profile name or UUID.')
         export_file = private_file(temp / 'ExportOptions.plist', plistlib.dumps(exports))
@@ -287,7 +634,7 @@ def ios_signing(c, store, cmd, temp):
             raise SafeError('Signing cleanup failed. Run ./bento recover-signing before another build or resuming Bitrise.')
 
 
-def ios(c, store, cmd, repo, temp, output):
+def ios(c, store, cmd, repo, temp, output, ios_config):
     xcode = cmd.run(['xcodebuild', '-version'], capture=True, label='Check Xcode')
     if not c['toolchain']['expected_xcode'] or c['toolchain']['expected_xcode'] not in xcode.splitlines()[0]:
         raise SafeError('Set toolchain.expected_xcode to the qualified existing Xcode version reported by ./bento doctor.')
@@ -307,27 +654,30 @@ def ios(c, store, cmd, repo, temp, output):
     lock.write_text(re.sub(r'^PODFILE CHECKSUM: [0-9a-f]+$',
         'PODFILE CHECKSUM: ' + __import__('hashlib').sha1((repo / 'ios/Podfile').read_bytes()).hexdigest(),
         lock.read_text(), flags=re.M))
-    locked_pods = digest(lock)
     sources.authenticate(c, store, cmd, temp)
     cmd.run(['git', 'ls-remote', '--exit-code', new, 'refs/heads/auth-26-06-cocoapods'], capture=True,
             label='Check iOS native dependency branch')
     # The original boost patch accidentally depends on a relative path; prepare() fails if it cannot apply.
+    lock_before = lock.read_text()
+    cmd.run([pod, 'install'], repo / 'ios', label='Materialize locked CocoaPods dependencies')
+    accept_hermes_checksum(lock_before, lock.read_text())
+    locked_pods = digest(lock)
     cmd.run([pod, 'install', '--deployment'], repo / 'ios', label='Install locked CocoaPods dependencies')
     if digest(lock) != locked_pods:
         raise SafeError('CocoaPods changed the adjusted lockfile; review dependency resolution before continuing.')
-    with ios_signing(c, store, cmd, temp) as (s, keychain, profile, export_file):
+    with ios_signing(c, store, cmd, temp, ios_config) as (s, keychain, profile, export_file):
         signing_file = private_file(temp / 'target-signing.json', json.dumps({
             'team': s['team_id'], 'identity': s['signing_identity'],
-            'profiles': s['export_options']['provisioningProfiles'], 'bundle_id': c['ios']['bundle_id']}))
+            'profiles': s['export_options']['provisioningProfiles'], 'bundle_id': ios_config['bundle_id']}))
         cmd.run(['ruby', ROOT / 'scripts/ios-signing.rb', repo / 'ios/BentoMobileApp.xcodeproj', signing_file], repo,
                 label='Configure signing only on app targets in the disposable checkout')
         archive = temp / 'app.xcarchive'
-        cmd.run(['xcodebuild', '-workspace', repo / c['ios']['workspace'], '-scheme', c['ios']['scheme'],
+        cmd.run(['xcodebuild', '-workspace', repo / ios_config['workspace'], '-scheme', ios_config['scheme'],
             '-configuration', 'Release', '-destination', 'generic/platform=iOS', '-derivedDataPath', temp / 'DerivedData',
             '-archivePath', archive, 'archive',
             'OTHER_CODE_SIGN_FLAGS=--keychain ' + __import__('shlex').quote(str(keychain))], repo, label='Archive signed iOS dev build')
         info = plistlib.loads((archive / 'Info.plist').read_bytes())['ApplicationProperties']
-        if info['CFBundleIdentifier'] != c['ios']['bundle_id']:
+        if info['CFBundleIdentifier'] != ios_config['bundle_id']:
             raise SafeError('Archived iOS bundle ID does not match configured identity.')
         cmd.run(['xcodebuild', '-exportArchive', '-archivePath', archive, '-exportPath', temp / 'export',
                  '-exportOptionsPlist', export_file], repo, label='Export signed IPA')
@@ -338,7 +688,7 @@ def ios(c, store, cmd, repo, temp, output):
         cmd.run(['codesign', '--verify', '--deep', '--strict', archive / 'Products' / info['ApplicationPath']], capture=True, label='Verify iOS archive signature')
         cmd.run(['ditto', '-x', '-k', ipas[0], temp / 'export-check'], capture=True, label='Inspect exported IPA')
         apps = list((temp / 'export-check/Payload').glob('*.app'))
-        if len(apps) != 1 or plistlib.loads((apps[0] / 'Info.plist').read_bytes())['CFBundleIdentifier'] != c['ios']['bundle_id']:
+        if len(apps) != 1 or plistlib.loads((apps[0] / 'Info.plist').read_bytes())['CFBundleIdentifier'] != ios_config['bundle_id']:
             raise SafeError('Exported IPA identity did not match.')
         cmd.run(['codesign', '--verify', '--deep', '--strict', apps[0]], capture=True, label='Verify exported IPA signature')
         shutil.copy2(ipas[0], output / ipas[0].name)
@@ -346,7 +696,8 @@ def ios(c, store, cmd, repo, temp, output):
             shutil.make_archive(str(output / 'dSYMs'), 'zip', archive, 'dSYMs')
         cmd.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', archive, output / 'xcarchive.zip'],
                 capture=True, label='Retain Xcode archive')
-    return {'app_id': info['CFBundleIdentifier'], 'version': info.get('CFBundleShortVersionString'),
+    return {'app_id': info['CFBundleIdentifier'], 'scheme': ios_config['scheme'],
+        'version': info.get('CFBundleShortVersionString'),
         'build_number': info.get('CFBundleVersion'), 'xcode': xcode.strip(), 'ruby': ruby.strip(), 'cocoapods': pod_version,
         'signing': 'local-file-key' if c.get('credential_source') == 'local' else 'secrets-manager-key',
         'export_method': s['export_options'].get('method')}
@@ -412,7 +763,8 @@ def build_signals():
             signal.signal(sig, handler)
 
 
-def execute_build(c, platform, repo, sha, pipeline, job, source='gitlab', canceled=None):
+def execute_build(c, platform, repo, sha, pipeline, job, source='gitlab', canceled=None, branch='dev',
+                  android_variant=None, ios_variant=None):
     """Caller owns the host lock; repo must be a disposable checkout."""
     if shutil.disk_usage(ROOT).free < c['minimum_free_gb'] * 1024 ** 3:
         raise SafeError('Insufficient free disk space; archive old artifacts or expand storage.')
@@ -424,15 +776,24 @@ def execute_build(c, platform, repo, sha, pipeline, job, source='gitlab', cancel
         cmd = Commands(tool_env(c, native=platform != 'validate'), canceled=canceled)
         cmd.env['PATH'] = str(Path(cmd.env['JAVA_HOME']) / 'bin') + os.pathsep + cmd.env['PATH'] if cmd.env.get('JAVA_HOME') else cmd.env['PATH']
         try:
-            tools = prepare(c, store, cmd, repo, temp, native=platform != 'validate')
+            android_config = android_configuration(c, android_variant or 'stage') if platform == 'android' else None
+            ios_config = ios_configuration(c, ios_variant) if platform == 'ios' else None
+            environment = (android_config or ios_config or {}).get('environment', 'dev')
+            tools = prepare(c, store, cmd, repo, temp, native=platform != 'validate', environment=environment)
             if platform == 'validate':
                 for action in ('typescript', 'lint', 'test'):
                     cmd.run(['yarn', action, *(['--runInBand', '--ci'] if action == 'test' else [])], repo)
                 return
+            android_version = None
+            if platform == 'android':
+                configure_android_environment(store, cmd, repo, android_config)
+                android_version = allocate_android_version(c)
+                apply_android_version(repo, android_version)
             output = artifact_dir(ROOT, pipeline, job, platform)
             output.mkdir(parents=True, exist_ok=False)
-            meta = (android if platform == 'android' else ios)(c, store, cmd, repo, temp, output)
-            manifest = {'project': c['project_path'], 'branch': 'dev', 'environment': 'dev', 'brand': 'usbank',
+            meta = android(c, store, cmd, repo, temp, output, android_config, android_version) if platform == 'android' else \
+                ios(c, store, cmd, repo, temp, output, ios_config)
+            manifest = {'project': c['project_path'], 'branch': branch, 'environment': environment, 'brand': 'usbank',
                 'sha': sha, 'pipeline_id': pipeline, 'job_id': job, 'platform': platform, 'tools': tools,
                 'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'native': meta,
                 'distribution': 'none', 'qualification': 'native-build-only', 'source': source,

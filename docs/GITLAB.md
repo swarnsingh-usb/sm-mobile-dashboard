@@ -29,7 +29,7 @@ For an app checkout with no existing CI file:
 
 Review, commit and push using the bank's normal process. This command deliberately refuses to overwrite an existing `.gitlab-ci.yml`. If one exists, merge the three jobs, the workflow rule and name, variables, and build stage carefully. `workflow` is project-wide: do not paste over existing rules for unrelated pipelines. Existing pipelines may need their own preserved naming/default behavior. Use GitLab's CI lint on the final combined file.
 
-The first milestone accepts only explicitly marked API/web pipelines on protected dev. No mirrored push or PR event starts a pilot native build automatically. Manual launch through GitLab's UI is possible with `BENTO_PORTAL=1` and the desired `BENTO_WORKFLOW`. The dashboard supplies both. The workflow names are `both-dev`, `android-dev`, `ios-dev`, `validate-dev`.
+The first milestone accepts only explicitly marked API/web pipelines on protected dev. No mirrored push or PR event starts a pilot native build automatically. Manual launch through GitLab's UI is possible with `BENTO_PORTAL=1` and the desired `BENTO_WORKFLOW`. The dashboard supplies both. The workflow names are `both-dev`, `android-stage`, `android-developer`, `ios-dev`, `ios-developer`, `validate-dev`.
 
 ## Branches and exact source
 

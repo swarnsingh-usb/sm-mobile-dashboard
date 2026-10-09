@@ -1,11 +1,21 @@
 """Source selection is independent of credential storage and build execution."""
 import re
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from .core import SafeError
+
+
+def validate_branch(value):
+    if not isinstance(value, str) or not value or len(value) > 255 or value != value.strip():
+        raise SafeError('Choose a valid source branch.')
+    result = subprocess.run(['git', 'check-ref-format', '--branch', value], capture_output=True)
+    if result.returncode:
+        raise SafeError('Choose a valid source branch.')
+    return value
 
 
 def defaults(c):

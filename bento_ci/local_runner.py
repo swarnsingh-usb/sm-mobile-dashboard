@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from . import source
-from .core import ROOT, WORKFLOWS, SafeError, Secrets, atomic_json, load_config
+from .core import ROOT, WORKFLOWS, WORKFLOW_TARGETS, SafeError, Secrets, atomic_json, load_config
 from .locking import check_window, host_lock
 
 
@@ -55,11 +55,41 @@ class LocalRuns:
 
     def builds(self):
         paths = sorted(self.directory.glob('[0-9]*/run.json'), key=lambda p: int(p.parent.name), reverse=True)
-        return [self.pipeline(p.parent.name) for p in paths]
+        rows = []
+        for path in paths:
+            try:
+                summary = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if summary.get('project') == self.c['project_path']:
+                rows.append(self.pipeline(path.parent.name))
+        return rows
 
-    def launch(self, workflow, request_id):
+    def branches(self):
+        from .build import Commands, tool_env
+        runtime = self.root / 'runtime'
+        runtime.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=runtime) as tmp:
+            cmd = Commands(tool_env(self.c, self.root, native=False), monitor_bitrise=False)
+            source.authenticate(self.c, Secrets(self.c), cmd, Path(tmp))
+            output = cmd.run(['git', 'ls-remote', '--heads', '--refs', '--', source.clone_url(self.c)],
+                             capture=True, label='List source branches')
+        branches = set()
+        for line in output.splitlines():
+            match = re.fullmatch(r'[0-9a-f]{40,64}\s+refs/heads/(.+)', line)
+            if match:
+                try:
+                    branches.add(source.validate_branch(match.group(1)))
+                except SafeError:
+                    continue
+        return sorted(branches, key=lambda branch: (branch != 'dev', branch.casefold()))
+
+    def launch(self, workflow, request_id, branch='dev'):
         if workflow not in WORKFLOWS:
             raise SafeError('Unknown workflow.')
+        branch = source.validate_branch(branch)
+        if branch not in self.branches():
+            raise SafeError('Selected source branch does not exist.')
         check_window(self.root)
         # Exclusive mkdir is the ID allocator across concurrent web requests.
         ident = int(time.time() * 1000)
@@ -70,10 +100,14 @@ class LocalRuns:
                 break
             except FileExistsError:
                 ident += 1
-        targets = ['android', 'ios'] if workflow == 'both-dev' else [workflow.removesuffix('-dev')]
-        jobs = [{'id': ident * 10 + i, 'name': target, 'status': 'pending', 'pipeline': {'id': ident}}
-                for i, target in enumerate(['checkout', *targets])]
-        row = dict(identity(self.c), id=ident, ref='dev', sha='', status='pending',
+        jobs = [{'id': ident * 10, 'name': 'checkout', 'status': 'pending', 'pipeline': {'id': ident}}]
+        for i, (platform, variant) in enumerate(WORKFLOW_TARGETS[workflow], start=1):
+            job = {'id': ident * 10 + i, 'name': platform + (f'-{variant}' if variant else ''),
+                   'platform': platform, 'status': 'pending', 'pipeline': {'id': ident}}
+            if variant:
+                job['variant'] = variant
+            jobs.append(job)
+        row = dict(identity(self.c), id=ident, ref=branch, sha='', status='pending',
                    name='Bento Mac / ' + workflow, workflow=workflow, request_id=request_id,
                    created_at=now(), jobs=jobs, source_repository=source.repository(self.c), backend='local')
         self.save(row)
@@ -127,6 +161,7 @@ def worker_slot(root):
 def process_run(runs, row, c):
     from .build import Commands, Tee, execute_build, tool_env
     ident = row['id']
+    branch = source.validate_branch(row.get('ref', 'dev'))
     marker = runs.root / 'data/local-worker-active.json'
     job = row['jobs'][0]
     def cancellation():
@@ -165,24 +200,27 @@ def process_run(runs, row, c):
                 checkout = temp / 'source'
                 with job_log(job):
                     source.authenticate(c, Secrets(c), cmd, temp)
-                    cmd.run(['git', 'clone', '--no-checkout', '--single-branch', '--branch', 'dev', '--',
+                    cmd.run(['git', 'clone', '--no-checkout', '--single-branch', '--branch', branch, '--',
                              source.clone_url(c), checkout], label='Fetch configured dev source')
-                    sha = cmd.run(['git', 'rev-parse', '--verify', 'refs/remotes/origin/dev^{commit}'], checkout, capture=True).strip()
+                    sha = cmd.run(['git', 'rev-parse', '--verify', f'refs/remotes/origin/{branch}^{{commit}}'], checkout, capture=True).strip()
                     if not re.fullmatch(r'[0-9a-f]{40,64}', sha):
                         raise SafeError('Source did not resolve to a commit.')
                     row['sha'] = sha
                     runs.save(row)
-                    print(f'Pinned {source.provider(c)} dev commit: {sha}', flush=True)
+                    print(f'Pinned {source.provider(c)} {branch} commit: {sha}', flush=True)
                 for job in row['jobs'][1:]:
                     checkpoint()
                     check_window(runs.root)
                     with job_log(job), tempfile.TemporaryDirectory(prefix=job['name'] + '-', dir=temp) as working:
+                        platform = job.get('platform', job['name'])
                         repo = Path(working) / 'app'
                         cmd.run(['git', 'clone', '--no-local', '--no-checkout', '--', checkout, repo], capture=True,
                                 label='Create disposable platform checkout')
                         cmd.run(['git', 'checkout', '--detach', sha], repo, capture=True, label='Select pinned dev commit')
-                        execute_build(c, job['name'], repo, sha, str(ident), str(job['id']),
-                                      source='local-worker', canceled=cancellation)
+                        execute_build(c, platform, repo, sha, str(ident), str(job['id']), source='local-worker',
+                                      canceled=cancellation, branch=branch,
+                                      android_variant=job.get('variant') if platform == 'android' else None,
+                                      ios_variant=job.get('variant') if platform == 'ios' else None)
                     checkpoint()
                 row['status'] = 'success'
     except BaseException as error:

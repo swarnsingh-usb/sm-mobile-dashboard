@@ -70,6 +70,10 @@ def test_window_and_idempotent_launch(portal):
     assert c.post('/api/builds',json=payload,headers=headers).status_code==201
     assert c.post('/api/builds',json=payload,headers=headers).status_code==200
     assert gl.launches==1
+    payload['branch']='feature/not-hosted'
+    assert c.post('/api/builds',json=payload,headers=headers).status_code==400
+    assert gl.launches==1
+    payload['branch']='dev'
     payload['workflow']='ios-dev'
     assert c.post('/api/builds',json=payload,headers=headers).status_code==400
     assert gl.launches==1

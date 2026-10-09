@@ -60,7 +60,7 @@ The packaged installer was refreshed and checked for source integrity, nonempty-
 - Scoped instance-role access works; secret schemas, CA trust and native tool versions are valid.
 - The new runner is protected/tagged/locked to this project; generated pipeline passes GitLab CI lint on the bank version.
 - Bitrise is drained/stopped for the exclusive window; its original configuration is preserved.
-- Launch both-dev. Both jobs build the exact recorded SHA and explicit usbank/dev environment.
+- Launch both-dev. Both jobs build the exact recorded SHA and explicit usbank/stage environment.
 - Android APK package ID, version/build and signature are verified; iOS archive/export identity/signature/profile/entitlements are appropriate.
 - Download both outputs and compare local SHA-256 with manifest. If Artifactory is enabled, confirm server checksum and access permissions.
 - Verify failure/cancellation, keychain restoration, expired-window blocking, artifact survival and an approved SSH-only service/reboot recovery design.
